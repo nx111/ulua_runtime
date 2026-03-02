@@ -307,7 +307,7 @@ LUALIB_API void tolua_setnewindex(lua_State* L)
   lua_rawset(L, -3);
 }
 
-LUALIB_API bool tolua_pushudata(lua_State* L, int reference, int index)
+LUALIB_API int tolua_pushudata(lua_State* L, int reference, int index)
 {
   lua_rawgeti(L, LUA_REGISTRYINDEX, reference);
   lua_rawgeti(L, -1, index);
@@ -315,14 +315,14 @@ LUALIB_API bool tolua_pushudata(lua_State* L, int reference, int index)
   if (!lua_isnil(L, -1))
   {
     lua_remove(L, -2);
-    return true;
+    return 1;
   }
 
   lua_pop(L, 2);
-  return false;
+  return 0;
 }
 
-LUALIB_API bool tolua_pushnewudata(lua_State* L, int metaRef, int weakTableRef, int index)
+LUALIB_API int tolua_pushnewudata(lua_State* L, int metaRef, int weakTableRef, int index)
 {
   lua_rawgeti(L, LUA_REGISTRYINDEX, weakTableRef);
   luanet_newudata(L, index);
@@ -331,7 +331,7 @@ LUALIB_API bool tolua_pushnewudata(lua_State* L, int metaRef, int weakTableRef, 
   lua_pushvalue(L, -1);
   lua_rawseti(L, -3, index);
   lua_remove(L, -2);
-  return true;  
+  return 1;  
 }
 
 #ifdef _WIN32
