@@ -5,6 +5,7 @@
 #include <string.h>
 #include <malloc.h>
 #include <stdbool.h>
+#include <limits.h>
 #include "lua.h"
 #include "lualib.h"
 #include "lauxlib.h"
@@ -386,4 +387,29 @@ LUALIB_API int tolua_openlibs(lua_State* L)
 {
 	luaL_register(L, "tolua", funcs);
 	return 1;
+}
+
+#ifdef lua_tolstring
+#undef lua_tolstring
+#endif
+
+// Managed side declares lua_tolstring with ref int (4-byte length).
+// Keep native modules on lua_tolstring_internal(size_t*), and expose a
+// managed-safe adapter under the exported name lua_tolstring.
+extern const char* lua_tolstring_internal(lua_State* L, int idx, size_t* len);
+
+LUALIB_API const char* lua_tolstring(lua_State* L, int idx, int* len)
+{
+	size_t n = 0;
+	const char* s = lua_tolstring_internal(L, idx, len ? &n : NULL);
+
+	if (len != NULL)
+	{
+		if (n > (size_t)INT_MAX)
+			*len = INT_MAX;
+		else
+			*len = (int)n;
+	}
+
+	return s;
 }
