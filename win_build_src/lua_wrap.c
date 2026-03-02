@@ -228,7 +228,7 @@ int tolua_index(lua_State* L)
 {
   if (lua_isnil(L, 2))
   {
-    lua_pushnil(L);
+    luaL_error(L, "tolua_index: nil member key");
     return 1;
   }
 
