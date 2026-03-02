@@ -6,6 +6,8 @@
 #include <malloc.h>
 #include <stdbool.h>
 #include <limits.h>
+#include <stdio.h>
+#include <stdarg.h>
 #include "lua.h"
 #include "lualib.h"
 #include "lauxlib.h"
@@ -18,6 +20,29 @@
 #endif
 
 static int tag = 0;
+static int ulua_trace_budget = 4000;
+
+static void ulua_tracef(const char* fmt, ...)
+{
+    if (ulua_trace_budget <= 0)
+    {
+        return;
+    }
+
+    FILE* fp = fopen("ulua_trace.log", "a");
+    if (fp == NULL)
+    {
+        return;
+    }
+
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(fp, fmt, ap);
+    va_end(ap);
+    fputc('\n', fp);
+    fclose(fp);
+    ulua_trace_budget--;
+}
 
 
 LUALIB_API int luaL_checkmetatable(lua_State *L,int index) 
@@ -226,8 +251,16 @@ LUALIB_API void tolua_getvec3(lua_State* L, int pos, float* x, float* y, float* 
 
 int tolua_index(lua_State* L)
 {
+  int keyType = lua_type(L, 2);
+  const char* keyName = NULL;
+  if (keyType == LUA_TSTRING)
+  {
+    keyName = lua_tostring(L, 2);
+  }
+
   if (lua_isnil(L, 2))
   {
+    ulua_tracef("tolua_index nil-key objRef=%d", luanet_tonetobject(L, 1));
     luaL_error(L, "tolua_index: nil member key");
     return 1;
   }
@@ -252,12 +285,19 @@ int tolua_index(lua_State* L)
       lua_call(L, 2, 1);
       if (lua_isnil(L, -1))
       {
+        ulua_tracef("tolua_index 2arg-nil keyType=%d key=%s objRef=%d",
+          keyType, keyName ? keyName : "(null)", luanet_tonetobject(L, 1));
         // Compatibility fallback: some legacy getters only accept self.
         // Retry with one argument when the 2-arg call yields nil.
         lua_pop(L, 1);
         lua_rawgeti(L, -1, 1);
         lua_pushvalue(L, 1);
         lua_call(L, 1, 1);
+        if (lua_isnil(L, -1))
+        {
+          ulua_tracef("tolua_index 1arg-still-nil keyType=%d key=%s objRef=%d",
+            keyType, keyName ? keyName : "(null)", luanet_tonetobject(L, 1));
+        }
       }
       return 1;
       /*lua_rawgeti(L, -1, 1);  
@@ -336,6 +376,7 @@ LUALIB_API int tolua_pushudata(lua_State* L, int reference, int index)
   }
 
   lua_pop(L, 2);
+  ulua_tracef("tolua_pushudata miss ref=%d index=%d", reference, index);
   return 0;
 }
 
@@ -394,6 +435,7 @@ static const struct luaL_reg funcs[] =
 
 LUALIB_API int tolua_openlibs(lua_State* L)
 {
+	ulua_tracef("tolua_openlibs loaded pid=%lu", (unsigned long)GetCurrentProcessId());
 	luaL_register(L, "tolua", funcs);
 	return 1;
 }
