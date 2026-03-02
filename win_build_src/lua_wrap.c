@@ -21,6 +21,7 @@
 
 static int tag = 0;
 static int ulua_trace_budget = 4000;
+static int ulua_nil_return_budget = 1200;
 
 static void ulua_tracef(const char* fmt, ...)
 {
@@ -463,4 +464,36 @@ LUALIB_API const char* lua_tolstring(lua_State* L, int idx, int* len)
 	}
 
 	return s;
+}
+
+#ifdef lua_pcall
+#undef lua_pcall
+#endif
+
+extern int lua_pcall_internal(lua_State* L, int nargs, int nresults, int errfunc);
+
+LUALIB_API int lua_pcall(lua_State* L, int nargs, int nresults, int errfunc)
+{
+	int topBefore = lua_gettop(L);
+	int status = lua_pcall_internal(L, nargs, nresults, errfunc);
+	int topAfter = lua_gettop(L);
+
+	if (status != 0)
+	{
+		const char* err = lua_tolstring_internal(L, -1, NULL);
+		ulua_tracef("lua_pcall status=%d nargs=%d nres=%d errfunc=%d topBefore=%d topAfter=%d err=%s",
+			status, nargs, nresults, errfunc, topBefore, topAfter, err ? err : "(null)");
+	}
+	else if (nresults == 1 && ulua_nil_return_budget > 0)
+	{
+		int t = lua_type(L, -1);
+		if (t == LUA_TNIL)
+		{
+			ulua_tracef("lua_pcall nil-return nargs=%d errfunc=%d topBefore=%d topAfter=%d",
+				nargs, errfunc, topBefore, topAfter);
+			ulua_nil_return_budget--;
+		}
+	}
+
+	return status;
 }
