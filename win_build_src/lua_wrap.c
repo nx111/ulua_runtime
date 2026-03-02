@@ -249,7 +249,16 @@ int tolua_index(lua_State* L)
       lua_rawgeti(L, -1, 1);        
       lua_pushvalue(L, 1);
       lua_pushvalue(L, 2);
-      lua_call(L, 2, -1);                
+      lua_call(L, 2, 1);
+      if (lua_isnil(L, -1))
+      {
+        // Compatibility fallback: some legacy getters only accept self.
+        // Retry with one argument when the 2-arg call yields nil.
+        lua_pop(L, 1);
+        lua_rawgeti(L, -1, 1);
+        lua_pushvalue(L, 1);
+        lua_call(L, 1, 1);
+      }
       return 1;
       /*lua_rawgeti(L, -1, 1);  
       lua_CFunction fn = lua_tocfunction (L, -1);
