@@ -22,6 +22,7 @@
 static int tag = 0;
 static int ulua_trace_budget = 4000;
 static int ulua_nil_return_budget = 1200;
+static int ulua_pcall_ok_budget = 200;
 
 static void ulua_tracef(const char* fmt, ...)
 {
@@ -282,23 +283,11 @@ int tolua_index(lua_State* L)
     {                      
       lua_rawgeti(L, -1, 1);        
       lua_pushvalue(L, 1);
-      lua_pushvalue(L, 2);
-      lua_call(L, 2, 1);
+      lua_call(L, 1, -1);
       if (lua_isnil(L, -1))
       {
-        ulua_tracef("tolua_index 2arg-nil keyType=%d key=%s objRef=%d",
+        ulua_tracef("tolua_index getter-nil keyType=%d key=%s objRef=%d",
           keyType, keyName ? keyName : "(null)", luanet_tonetobject(L, 1));
-        // Compatibility fallback: some legacy getters only accept self.
-        // Retry with one argument when the 2-arg call yields nil.
-        lua_pop(L, 1);
-        lua_rawgeti(L, -1, 1);
-        lua_pushvalue(L, 1);
-        lua_call(L, 1, 1);
-        if (lua_isnil(L, -1))
-        {
-          ulua_tracef("tolua_index 1arg-still-nil keyType=%d key=%s objRef=%d",
-            keyType, keyName ? keyName : "(null)", luanet_tonetobject(L, 1));
-        }
       }
       return 1;
       /*lua_rawgeti(L, -1, 1);  
@@ -314,6 +303,8 @@ int tolua_index(lua_State* L)
   }
 
   lua_settop(L, 2);
+  ulua_tracef("tolua_index miss keyType=%d key=%s objRef=%d",
+    keyType, keyName ? keyName : "(null)", luanet_tonetobject(L, 1));
   luaL_error(L, "field or property %s does not exist", lua_tostring(L, 2));        
   return 1;
 }
@@ -484,14 +475,24 @@ LUALIB_API int lua_pcall(lua_State* L, int nargs, int nresults, int errfunc)
 		ulua_tracef("lua_pcall status=%d nargs=%d nres=%d errfunc=%d topBefore=%d topAfter=%d err=%s",
 			status, nargs, nresults, errfunc, topBefore, topAfter, err ? err : "(null)");
 	}
-	else if (nresults == 1 && ulua_nil_return_budget > 0)
+	else
 	{
-		int t = lua_type(L, -1);
-		if (t == LUA_TNIL)
+		if (ulua_pcall_ok_budget > 0)
 		{
-			ulua_tracef("lua_pcall nil-return nargs=%d errfunc=%d topBefore=%d topAfter=%d",
-				nargs, errfunc, topBefore, topAfter);
-			ulua_nil_return_budget--;
+			int retType = (topAfter > 0) ? lua_type(L, -1) : LUA_TNONE;
+			ulua_tracef("lua_pcall ok nargs=%d nres=%d errfunc=%d topBefore=%d topAfter=%d retType=%d",
+				nargs, nresults, errfunc, topBefore, topAfter, retType);
+			ulua_pcall_ok_budget--;
+		}
+		if (nresults == 1 && ulua_nil_return_budget > 0)
+		{
+			int t = lua_type(L, -1);
+			if (t == LUA_TNIL)
+			{
+				ulua_tracef("lua_pcall nil-return nargs=%d errfunc=%d topBefore=%d topAfter=%d",
+					nargs, errfunc, topBefore, topAfter);
+				ulua_nil_return_budget--;
+			}
 		}
 	}
 
