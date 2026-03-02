@@ -45,19 +45,23 @@ static class Program
         bool patchedLuaFunctionPopValuesSafe = PatchLuaFunctionPopValuesSafe(module);
         bool patchedLuaFunctionCallGuard = PatchLuaFunctionCallGuard(module);
         bool patchedLuaFunctionCallArgsNull = PatchLuaFunctionCallArgsNullGuard(module);
+        bool patchedLuaFunctionCallTrace = PatchLuaFunctionCallCatchTrace(module);
         bool patchedObjectTranslatorFromStateSafe = PatchObjectTranslatorFromStateSafe(module);
+        bool patchedPushVarObjectTranslatorGuard = PatchLuaScriptMgrPushVarObjectTranslatorGuard(module);
+        bool patchedPushTraceBackSafe = PatchLuaScriptMgrPushTraceBackSafe(module);
+        bool patchedDisableLuaFunctionCache = PatchLuaScriptMgrDisableGetLuaFunctionCache(module);
         bool patchedThrowException = false;
         bool patchedProxyTypeGetMember = false;
         bool patchedImportType = PatchImportTypeForFileLogger(module);
 
-        if (!patchedGetMemberFlags && !patchedUnknownInstance && !patchedCustomXmlSerializer && !patchedThrowErrorUnknownInstance && !patchedLuaFunctionEnsureTranslator && !patchedLuaFunctionPushSafe && !patchedLuaFunctionPopValuesSafe && !patchedLuaFunctionCallGuard && !patchedLuaFunctionCallArgsNull && !patchedObjectTranslatorFromStateSafe && !patchedImportType)
+        if (!patchedGetMemberFlags && !patchedUnknownInstance && !patchedCustomXmlSerializer && !patchedThrowErrorUnknownInstance && !patchedLuaFunctionEnsureTranslator && !patchedLuaFunctionPushSafe && !patchedLuaFunctionPopValuesSafe && !patchedLuaFunctionCallGuard && !patchedLuaFunctionCallArgsNull && !patchedLuaFunctionCallTrace && !patchedObjectTranslatorFromStateSafe && !patchedPushVarObjectTranslatorGuard && !patchedPushTraceBackSafe && !patchedDisableLuaFunctionCache && !patchedImportType)
         {
             Console.WriteLine("No patch points matched; nothing changed.");
             return 3;
         }
 
         module.Write(output);
-        Console.WriteLine($"Patched: getClassMethod={patchedClassMethod}, checkMemberCache={patchedMemberCache}, getMember={patchedGetMember}, getMemberFlags={patchedGetMemberFlags}, unknownInstance={patchedUnknownInstance}, customXml={patchedCustomXmlSerializer}, throwErrorUnknownInstance={patchedThrowErrorUnknownInstance}, luaFuncEnsureTranslator={patchedLuaFunctionEnsureTranslator}, luaFuncPushSafe={patchedLuaFunctionPushSafe}, luaFuncPopValuesSafe={patchedLuaFunctionPopValuesSafe}, luaFuncCallGuard={patchedLuaFunctionCallGuard}, luaFuncCallArgsNull={patchedLuaFunctionCallArgsNull}, fromStateSafe={patchedObjectTranslatorFromStateSafe}, throwException={patchedThrowException}, proxyGetMember={patchedProxyTypeGetMember}, importType={patchedImportType}");
+        Console.WriteLine($"Patched: getClassMethod={patchedClassMethod}, checkMemberCache={patchedMemberCache}, getMember={patchedGetMember}, getMemberFlags={patchedGetMemberFlags}, unknownInstance={patchedUnknownInstance}, customXml={patchedCustomXmlSerializer}, throwErrorUnknownInstance={patchedThrowErrorUnknownInstance}, luaFuncEnsureTranslator={patchedLuaFunctionEnsureTranslator}, luaFuncPushSafe={patchedLuaFunctionPushSafe}, luaFuncPopValuesSafe={patchedLuaFunctionPopValuesSafe}, luaFuncCallGuard={patchedLuaFunctionCallGuard}, luaFuncCallArgsNull={patchedLuaFunctionCallArgsNull}, luaFuncCallTrace={patchedLuaFunctionCallTrace}, fromStateSafe={patchedObjectTranslatorFromStateSafe}, pushVarTranslatorGuard={patchedPushVarObjectTranslatorGuard}, pushTraceBackSafe={patchedPushTraceBackSafe}, disableLuaFuncCache={patchedDisableLuaFunctionCache}, throwException={patchedThrowException}, proxyGetMember={patchedProxyTypeGetMember}, importType={patchedImportType}");
         return 0;
     }
 
@@ -853,6 +857,85 @@ static class Program
         return true;
     }
 
+    static bool PatchLuaFunctionCallCatchTrace(ModuleDef module)
+    {
+        var luaFunctionType = module.Types.FirstOrDefault(t => t.FullName == "LuaInterface.LuaFunction");
+        var luaBaseType = module.Types.FirstOrDefault(t => t.FullName == "LuaInterface.LuaBase");
+        if (luaFunctionType == null || luaBaseType == null)
+            return false;
+
+        var callMethod = luaFunctionType.Methods.FirstOrDefault(m =>
+            m.Name == "Call" &&
+            !m.IsStatic &&
+            m.Parameters.Count == 2 &&
+            m.Parameters[1].Type.FullName == "System.Object[]");
+        if (callMethod == null || callMethod.Body == null)
+            return false;
+
+        // Requires catch-based guard to exist.
+        if (callMethod.Body.ExceptionHandlers.Count == 0)
+            return false;
+
+        var instrs = callMethod.Body.Instructions;
+        var envGetStackTrace = module.GetTypes()
+            .SelectMany(t => t.Methods)
+            .Where(m => m.Body != null)
+            .SelectMany(m => m.Body!.Instructions)
+            .Where(i => (i.OpCode == OpCodes.Call || i.OpCode == OpCodes.Callvirt) && i.Operand is IMethod)
+            .Select(i => (IMethod)i.Operand!)
+            .FirstOrDefault(im =>
+                im.FullName == "System.String System.Environment::get_StackTrace()");
+        var logErrorRef = module.GetTypes()
+            .SelectMany(t => t.Methods)
+            .Where(m => m.Body != null)
+            .SelectMany(m => m.Body!.Instructions)
+            .Where(i => (i.OpCode == OpCodes.Call || i.OpCode == OpCodes.Callvirt) && i.Operand is IMethod)
+            .Select(i => (IMethod)i.Operand!)
+            .FirstOrDefault(im =>
+                im.DeclaringType.FullName == "UnityEngine.Debug" &&
+                im.Name == "LogError" &&
+                im.MethodSig != null &&
+                im.MethodSig.Params.Count == 1 &&
+                im.MethodSig.Params[0].FullName == "System.Object");
+        var nameField = luaBaseType.Fields.FirstOrDefault(f =>
+            f.Name == "name" &&
+            f.FieldType.FullName == "System.String");
+        if (envGetStackTrace == null || logErrorRef == null || nameField == null)
+            return false;
+
+        // Idempotent: already logs Environment.StackTrace in catch path.
+        if (instrs.Any(i => (i.OpCode == OpCodes.Call || i.OpCode == OpCodes.Callvirt) &&
+                            i.Operand is IMethod im &&
+                            im.FullName == "System.String System.Environment::get_StackTrace()"))
+            return false;
+
+        // Insert trace logs right after the first Debug.LogError(ex) call in catch block.
+        for (int i = 0; i < instrs.Count - 1; i++)
+        {
+            if ((instrs[i].OpCode == OpCodes.Call || instrs[i].OpCode == OpCodes.Callvirt) &&
+                instrs[i].Operand is IMethod im &&
+                im == logErrorRef)
+            {
+                var inject = new[]
+                {
+                    Instruction.Create(OpCodes.Ldarg_0),
+                    Instruction.Create(OpCodes.Ldfld, nameField),
+                    Instruction.Create(OpCodes.Call, logErrorRef),
+                    Instruction.Create(OpCodes.Call, envGetStackTrace),
+                    Instruction.Create(OpCodes.Call, logErrorRef),
+                };
+                for (int j = 0; j < inject.Length; j++)
+                    instrs.Insert(i + 1 + j, inject[j]);
+
+                callMethod.Body.SimplifyBranches();
+                callMethod.Body.OptimizeBranches();
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     static bool PatchObjectTranslatorFromStateSafe(ModuleDef module)
     {
         var translatorType = module.Types.FirstOrDefault(t => t.FullName == "LuaInterface.ObjectTranslator");
@@ -1005,6 +1088,237 @@ static class Program
         fromState.Body.SimplifyBranches();
         fromState.Body.OptimizeBranches();
         return true;
+    }
+
+    static bool PatchLuaScriptMgrPushVarObjectTranslatorGuard(ModuleDef module)
+    {
+        var scriptMgr = module.Types.FirstOrDefault(t => t.FullName == "LuaScriptMgr");
+        var luaDllType = module.Types.FirstOrDefault(t => t.FullName == "LuaInterface.LuaDLL");
+        if (scriptMgr == null || luaDllType == null)
+            return false;
+
+        var pushVarObject = scriptMgr.Methods.FirstOrDefault(m =>
+            m.Name == "PushVarObject" &&
+            m.IsStatic &&
+            m.Parameters.Count == 2 &&
+            m.Parameters[0].Type.FullName == "System.IntPtr" &&
+            m.Parameters[1].Type.FullName == "System.Object");
+        if (pushVarObject == null || pushVarObject.Body == null)
+            return false;
+
+        var getTranslator = scriptMgr.Methods.FirstOrDefault(m =>
+            m.Name == "GetTranslator" &&
+            m.IsStatic &&
+            m.Parameters.Count == 1 &&
+            m.Parameters[0].Type.FullName == "System.IntPtr");
+        if (getTranslator == null)
+            return false;
+
+        var luaPushNil = luaDllType.Methods.FirstOrDefault(m =>
+            m.Name == "lua_pushnil" &&
+            m.IsStatic &&
+            m.Parameters.Count == 1 &&
+            m.Parameters[0].Type.FullName == "System.IntPtr");
+        if (luaPushNil == null)
+            return false;
+
+        var instrs = pushVarObject.Body.Instructions;
+        bool changed = false;
+
+        for (int i = 0; i < instrs.Count - 6; i++)
+        {
+            if (instrs[i].OpCode != OpCodes.Call || !Equals(instrs[i].Operand, getTranslator))
+                continue;
+
+            // Pattern:
+            // call GetTranslator
+            // ldarg.0
+            // ldarg.1
+            // castclass LuaInterface.LuaCSFunction
+            // callvirt ObjectTranslator::pushFunction
+            // br ...
+            if (!instrs[i + 1].IsLdarg() ||
+                instrs[i + 1].GetParameter(pushVarObject.Parameters)?.Index != 0)
+                continue;
+            if (!instrs[i + 2].IsLdarg() ||
+                instrs[i + 2].GetParameter(pushVarObject.Parameters)?.Index != 1)
+                continue;
+            if (instrs[i + 3].OpCode != OpCodes.Castclass ||
+                instrs[i + 3].Operand is not ITypeDefOrRef castType ||
+                castType.FullName != "LuaInterface.LuaCSFunction")
+                continue;
+            if (instrs[i + 4].OpCode != OpCodes.Callvirt ||
+                instrs[i + 4].Operand is not IMethod pushFunc ||
+                pushFunc.Name != "pushFunction" ||
+                pushFunc.DeclaringType.FullName != "LuaInterface.ObjectTranslator")
+                continue;
+            if ((instrs[i + 5].OpCode != OpCodes.Br && instrs[i + 5].OpCode != OpCodes.Br_S) ||
+                instrs[i + 5].Operand is not Instruction branchTarget)
+                continue;
+
+            // Idempotent: already guarded if there is a dup+brtrue sequence immediately after GetTranslator.
+            if (i + 2 < instrs.Count &&
+                instrs[i + 1].OpCode == OpCodes.Dup &&
+                instrs[i + 2].OpCode == OpCodes.Brtrue_S)
+            {
+                continue;
+            }
+
+            var hasTranslator = instrs[i + 1];
+            var guard = new[]
+            {
+                Instruction.Create(OpCodes.Dup),
+                Instruction.Create(OpCodes.Brtrue_S, hasTranslator),
+                Instruction.Create(OpCodes.Pop),
+                Instruction.Create(OpCodes.Ldarg_0),
+                Instruction.Create(OpCodes.Call, luaPushNil),
+                Instruction.Create(OpCodes.Br_S, branchTarget),
+            };
+
+            for (int g = 0; g < guard.Length; g++)
+                instrs.Insert(i + 1 + g, guard[g]);
+
+            changed = true;
+            break;
+        }
+
+        if (!changed)
+            return false;
+
+        pushVarObject.Body.SimplifyBranches();
+        pushVarObject.Body.OptimizeBranches();
+        return true;
+    }
+
+    static bool PatchLuaScriptMgrPushTraceBackSafe(ModuleDef module)
+    {
+        var scriptMgr = module.Types.FirstOrDefault(t => t.FullName == "LuaScriptMgr");
+        var luaDllType = module.Types.FirstOrDefault(t => t.FullName == "LuaInterface.LuaDLL");
+        if (scriptMgr == null || luaDllType == null)
+            return false;
+
+        var method = scriptMgr.Methods.FirstOrDefault(m =>
+            m.Name == "PushTraceBack" &&
+            m.IsStatic &&
+            m.Parameters.Count == 1 &&
+            m.Parameters[0].Type.FullName == "System.IntPtr");
+        if (method == null || method.Body == null)
+            return false;
+
+        var luaGetGlobal = luaDllType.Methods.FirstOrDefault(m =>
+            m.Name == "lua_getglobal" &&
+            m.IsStatic &&
+            m.Parameters.Count == 2 &&
+            m.Parameters[0].Type.FullName == "System.IntPtr" &&
+            m.Parameters[1].Type.FullName == "System.String");
+        if (luaGetGlobal == null)
+            return false;
+
+        // Idempotent: already rewritten to direct global lookup.
+        if (method.Body.Instructions.Count <= 6 &&
+            method.Body.Instructions.Any(i =>
+                (i.OpCode == OpCodes.Call || i.OpCode == OpCodes.Callvirt) &&
+                i.Operand is IMethod im &&
+                im.Name == "lua_getglobal") &&
+            !method.Body.Instructions.Any(i =>
+                (i.OpCode == OpCodes.Ldsfld || i.OpCode == OpCodes.Ldfld) &&
+                i.Operand is IField f &&
+                f.Name == "traceback"))
+        {
+            return false;
+        }
+
+        method.Body.Instructions.Clear();
+        method.Body.ExceptionHandlers.Clear();
+        method.Body.Variables.Clear();
+        method.Body.InitLocals = false;
+
+        method.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+        method.Body.Instructions.Add(Instruction.Create(OpCodes.Ldstr, "traceback"));
+        method.Body.Instructions.Add(Instruction.Create(OpCodes.Call, luaGetGlobal));
+        method.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+
+        method.Body.SimplifyBranches();
+        method.Body.OptimizeBranches();
+        return true;
+    }
+
+    static bool PatchLuaScriptMgrDisableGetLuaFunctionCache(ModuleDef module)
+    {
+        var scriptMgr = module.Types.FirstOrDefault(t => t.FullName == "LuaScriptMgr");
+        if (scriptMgr == null)
+            return false;
+
+        var method = scriptMgr.Methods.FirstOrDefault(m =>
+            m.Name == "GetLuaFunction" &&
+            m.Parameters.Any(p => p.Type.FullName == "System.String"));
+        if (method == null || method.Body == null)
+            return false;
+
+        var instrs = method.Body.Instructions;
+        for (int i = 0; i < instrs.Count - 1; i++)
+        {
+            if ((instrs[i].OpCode != OpCodes.Call && instrs[i].OpCode != OpCodes.Callvirt) ||
+                instrs[i].Operand is not IMethod called ||
+                called.Name != "TryGetValue")
+            {
+                continue;
+            }
+
+            int branchIdx = -1;
+            for (int j = i + 1; j <= Math.Min(i + 4, instrs.Count - 1); j++)
+            {
+                var op = instrs[j].OpCode;
+                if ((op == OpCodes.Brtrue || op == OpCodes.Brtrue_S || op == OpCodes.Brfalse || op == OpCodes.Brfalse_S) &&
+                    instrs[j].Operand is Instruction)
+                {
+                    branchIdx = j;
+                    break;
+                }
+            }
+
+            if (branchIdx < 0)
+                continue;
+
+            // Idempotent for the "force miss" form: pop TryGetValue result and push false.
+            if (instrs[branchIdx].OpCode == OpCodes.Brfalse || instrs[branchIdx].OpCode == OpCodes.Brfalse_S)
+            {
+                if (branchIdx >= 2 &&
+                    instrs[branchIdx - 2].OpCode == OpCodes.Pop &&
+                    instrs[branchIdx - 1].OpCode == OpCodes.Ldc_I4_0)
+                {
+                    return false;
+                }
+            }
+
+            // Common shape: branch on cache-hit. Flip it to branch on cache-miss.
+            if (instrs[branchIdx].OpCode == OpCodes.Brtrue)
+            {
+                instrs[branchIdx].OpCode = OpCodes.Brfalse;
+                method.Body.SimplifyBranches();
+                method.Body.OptimizeBranches();
+                return true;
+            }
+            if (instrs[branchIdx].OpCode == OpCodes.Brtrue_S)
+            {
+                instrs[branchIdx].OpCode = OpCodes.Brfalse_S;
+                method.Body.SimplifyBranches();
+                method.Body.OptimizeBranches();
+                return true;
+            }
+
+            // If original method already uses brfalse, force the miss path explicitly.
+            if (instrs[branchIdx].OpCode == OpCodes.Brfalse || instrs[branchIdx].OpCode == OpCodes.Brfalse_S)
+            {
+                instrs.Insert(branchIdx, Instruction.Create(OpCodes.Pop));
+                instrs.Insert(branchIdx + 1, Instruction.Create(OpCodes.Ldc_I4_0));
+                method.Body.SimplifyBranches();
+                method.Body.OptimizeBranches();
+                return true;
+            }
+        }
+
+        return false;
     }
 
     static bool PatchLuaFunctionEnsureTranslator(ModuleDef module)
@@ -1261,131 +1575,138 @@ static class Program
                 MethodSig.CreateInstance(popSafeRetSig, intSig, returnTypesSig),
                 MethodImplAttributes.IL | MethodImplAttributes.Managed,
                 MethodAttributes.Private | MethodAttributes.HideBySig);
-
-            popSafeMethod.Body = new CilBody { InitLocals = true };
-            var trLocal = new Local(translatorType.ToTypeSig());
-            var popRetLocal = new Local(popSafeRetSig);
-            popSafeMethod.Body.Variables.Add(trLocal);
-            popSafeMethod.Body.Variables.Add(popRetLocal);
-
-            var il = popSafeMethod.Body.Instructions;
-
-            var e0 = Instruction.Create(OpCodes.Ldarg_0);
-            var e1 = Instruction.Create(OpCodes.Call, ensureMethod);
-            var e2 = Instruction.Create(OpCodes.Stloc_0);
-            var e3 = Instruction.Create(OpCodes.Leave_S, (Instruction)null!);
-
-            var ec0 = Instruction.Create(OpCodes.Pop);
-            var ec1 = Instruction.Create(OpCodes.Ldnull);
-            var ec2 = Instruction.Create(OpCodes.Stloc_0);
-            var ec3 = Instruction.Create(OpCodes.Leave_S, (Instruction)null!);
-
-            var afterEnsure = Instruction.Create(OpCodes.Ldloc_0);
-            var hasTranslator = Instruction.Create(OpCodes.Nop);
-            var callTyped = Instruction.Create(OpCodes.Nop);
-            var popTryStart = Instruction.Create(OpCodes.Nop);
-            var retPoint = Instruction.Create(OpCodes.Ldloc_1);
-            var retIns = Instruction.Create(OpCodes.Ret);
-
-            var p0 = Instruction.Create(OpCodes.Ldarg_2);
-            var p1 = Instruction.Create(OpCodes.Brtrue_S, callTyped);
-            var p2 = Instruction.Create(OpCodes.Ldloc_0);
-            var p3 = Instruction.Create(OpCodes.Ldarg_0);
-            var p4 = Instruction.Create(OpCodes.Ldfld, lField);
-            var p5 = Instruction.Create(OpCodes.Ldarg_1);
-            var p6 = Instruction.Create(OpCodes.Callvirt, popValuesNoTypes);
-            var p7 = Instruction.Create(OpCodes.Stloc_1);
-            var p8 = Instruction.Create(OpCodes.Leave_S, (Instruction)null!);
-
-            var pt0 = callTyped;
-            var pt1 = Instruction.Create(OpCodes.Ldloc_0);
-            var pt2 = Instruction.Create(OpCodes.Ldarg_0);
-            var pt3 = Instruction.Create(OpCodes.Ldfld, lField);
-            var pt4 = Instruction.Create(OpCodes.Ldarg_1);
-            var pt5 = Instruction.Create(OpCodes.Ldarg_2);
-            var pt6 = Instruction.Create(OpCodes.Callvirt, popValuesWithTypes);
-            var pt7 = Instruction.Create(OpCodes.Stloc_1);
-            var pt8 = Instruction.Create(OpCodes.Leave_S, (Instruction)null!);
-
-            var pc0 = Instruction.Create(OpCodes.Pop);
-            var pc1 = Instruction.Create(OpCodes.Ldc_I4_0);
-            var pc2 = Instruction.Create(OpCodes.Newarr, module.CorLibTypes.Object.TypeDefOrRef);
-            var pc3 = Instruction.Create(OpCodes.Stloc_1);
-            var pc4 = Instruction.Create(OpCodes.Leave_S, (Instruction)null!);
-
-            e3.Operand = afterEnsure;
-            ec3.Operand = afterEnsure;
-            p8.Operand = retPoint;
-            pt8.Operand = retPoint;
-            pc4.Operand = retPoint;
-
-            il.Add(e0);
-            il.Add(e1);
-            il.Add(e2);
-            il.Add(e3);
-            il.Add(ec0);
-            il.Add(ec1);
-            il.Add(ec2);
-            il.Add(ec3);
-
-            il.Add(afterEnsure);
-            il.Add(Instruction.Create(OpCodes.Brtrue_S, hasTranslator));
-            il.Add(Instruction.Create(OpCodes.Ldc_I4_0));
-            il.Add(Instruction.Create(OpCodes.Newarr, module.CorLibTypes.Object.TypeDefOrRef));
-            il.Add(Instruction.Create(OpCodes.Stloc_1));
-            il.Add(Instruction.Create(OpCodes.Br_S, retPoint));
-
-            il.Add(hasTranslator);
-            il.Add(popTryStart);
-            il.Add(p0);
-            il.Add(p1);
-            il.Add(p2);
-            il.Add(p3);
-            il.Add(p4);
-            il.Add(p5);
-            il.Add(p6);
-            il.Add(p7);
-            il.Add(p8);
-            il.Add(pt0);
-            il.Add(pt1);
-            il.Add(pt2);
-            il.Add(pt3);
-            il.Add(pt4);
-            il.Add(pt5);
-            il.Add(pt6);
-            il.Add(pt7);
-            il.Add(pt8);
-            il.Add(pc0);
-            il.Add(pc1);
-            il.Add(pc2);
-            il.Add(pc3);
-            il.Add(pc4);
-            il.Add(retPoint);
-            il.Add(retIns);
-
-            var exType = module.CorLibTypes.GetTypeRef("System", "Exception");
-            popSafeMethod.Body.ExceptionHandlers.Add(new ExceptionHandler(ExceptionHandlerType.Catch)
-            {
-                TryStart = e0,
-                TryEnd = ec0,
-                HandlerStart = ec0,
-                HandlerEnd = afterEnsure,
-                CatchType = exType
-            });
-            popSafeMethod.Body.ExceptionHandlers.Add(new ExceptionHandler(ExceptionHandlerType.Catch)
-            {
-                TryStart = popTryStart,
-                TryEnd = pc0,
-                HandlerStart = pc0,
-                HandlerEnd = retPoint,
-                CatchType = exType
-            });
-
-            popSafeMethod.Body.SimplifyBranches();
-            popSafeMethod.Body.OptimizeBranches();
             luaFunctionType.Methods.Add(popSafeMethod);
             createdPopSafe = true;
         }
+
+        if (popSafeMethod.Body == null)
+            popSafeMethod.Body = new CilBody();
+        popSafeMethod.Body.Instructions.Clear();
+        popSafeMethod.Body.ExceptionHandlers.Clear();
+        popSafeMethod.Body.Variables.Clear();
+        popSafeMethod.Body.InitLocals = true;
+
+        var trLocal = new Local(translatorType.ToTypeSig());
+        var popRetLocal = new Local(popSafeMethod.ReturnType);
+        popSafeMethod.Body.Variables.Add(trLocal);
+        popSafeMethod.Body.Variables.Add(popRetLocal);
+
+        var il = popSafeMethod.Body.Instructions;
+
+        var e0 = Instruction.Create(OpCodes.Ldarg_0);
+        var e1 = Instruction.Create(OpCodes.Call, ensureMethod);
+        var e2 = Instruction.Create(OpCodes.Stloc_0);
+        var e3 = Instruction.Create(OpCodes.Leave_S, (Instruction)null!);
+
+        var ec0 = Instruction.Create(OpCodes.Pop);
+        var ec1 = Instruction.Create(OpCodes.Ldnull);
+        var ec2 = Instruction.Create(OpCodes.Stloc_0);
+        var ec3 = Instruction.Create(OpCodes.Leave_S, (Instruction)null!);
+
+        var afterEnsure = Instruction.Create(OpCodes.Ldloc_0);
+        var hasTranslator = Instruction.Create(OpCodes.Nop);
+        var callTyped = Instruction.Create(OpCodes.Nop);
+        var popTryStart = Instruction.Create(OpCodes.Nop);
+        var retPoint = Instruction.Create(OpCodes.Ldloc_1);
+        var retIns = Instruction.Create(OpCodes.Ret);
+
+        var p0 = Instruction.Create(OpCodes.Ldarg_2);
+        var p1 = Instruction.Create(OpCodes.Brtrue_S, callTyped);
+        var p2 = Instruction.Create(OpCodes.Ldloc_0);
+        var p3 = Instruction.Create(OpCodes.Ldarg_0);
+        var p4 = Instruction.Create(OpCodes.Ldfld, lField);
+        var p5 = Instruction.Create(OpCodes.Ldarg_1);
+        var p6 = Instruction.Create(OpCodes.Callvirt, popValuesNoTypes);
+        var p7 = Instruction.Create(OpCodes.Stloc_1);
+        var p8 = Instruction.Create(OpCodes.Leave_S, (Instruction)null!);
+
+        var pt0 = callTyped;
+        var pt1 = Instruction.Create(OpCodes.Ldloc_0);
+        var pt2 = Instruction.Create(OpCodes.Ldarg_0);
+        var pt3 = Instruction.Create(OpCodes.Ldfld, lField);
+        var pt4 = Instruction.Create(OpCodes.Ldarg_1);
+        var pt5 = Instruction.Create(OpCodes.Ldarg_2);
+        var pt6 = Instruction.Create(OpCodes.Callvirt, popValuesWithTypes);
+        var pt7 = Instruction.Create(OpCodes.Stloc_1);
+        var pt8 = Instruction.Create(OpCodes.Leave_S, (Instruction)null!);
+
+        var pc0 = Instruction.Create(OpCodes.Pop);
+        var pc1 = Instruction.Create(OpCodes.Ldc_I4_0);
+        var pc2 = Instruction.Create(OpCodes.Newarr, module.CorLibTypes.Object.TypeDefOrRef);
+        var pc3 = Instruction.Create(OpCodes.Stloc_1);
+        var pc4 = Instruction.Create(OpCodes.Leave_S, (Instruction)null!);
+
+        e3.Operand = afterEnsure;
+        ec3.Operand = afterEnsure;
+        p8.Operand = retPoint;
+        pt8.Operand = retPoint;
+        pc4.Operand = retPoint;
+
+        il.Add(e0);
+        il.Add(e1);
+        il.Add(e2);
+        il.Add(e3);
+        il.Add(ec0);
+        il.Add(ec1);
+        il.Add(ec2);
+        il.Add(ec3);
+
+        il.Add(afterEnsure);
+        il.Add(Instruction.Create(OpCodes.Brtrue_S, hasTranslator));
+        il.Add(Instruction.Create(OpCodes.Ldc_I4_0));
+        il.Add(Instruction.Create(OpCodes.Newarr, module.CorLibTypes.Object.TypeDefOrRef));
+        il.Add(Instruction.Create(OpCodes.Stloc_1));
+        il.Add(Instruction.Create(OpCodes.Br_S, retPoint));
+
+        il.Add(hasTranslator);
+        il.Add(popTryStart);
+        il.Add(p0);
+        il.Add(p1);
+        il.Add(p2);
+        il.Add(p3);
+        il.Add(p4);
+        il.Add(p5);
+        il.Add(p6);
+        il.Add(p7);
+        il.Add(p8);
+        il.Add(pt0);
+        il.Add(pt1);
+        il.Add(pt2);
+        il.Add(pt3);
+        il.Add(pt4);
+        il.Add(pt5);
+        il.Add(pt6);
+        il.Add(pt7);
+        il.Add(pt8);
+        il.Add(pc0);
+        il.Add(pc1);
+        il.Add(pc2);
+        il.Add(pc3);
+        il.Add(pc4);
+        il.Add(retPoint);
+        il.Add(retIns);
+
+        var exType = module.CorLibTypes.GetTypeRef("System", "Exception");
+        popSafeMethod.Body.ExceptionHandlers.Add(new ExceptionHandler(ExceptionHandlerType.Catch)
+        {
+            TryStart = e0,
+            TryEnd = ec0,
+            HandlerStart = ec0,
+            HandlerEnd = afterEnsure,
+            CatchType = exType
+        });
+        popSafeMethod.Body.ExceptionHandlers.Add(new ExceptionHandler(ExceptionHandlerType.Catch)
+        {
+            TryStart = popTryStart,
+            TryEnd = pc0,
+            HandlerStart = pc0,
+            HandlerEnd = retPoint,
+            CatchType = exType
+        });
+
+        popSafeMethod.Body.SimplifyBranches();
+        popSafeMethod.Body.OptimizeBranches();
+        bool rewrotePopSafe = true;
 
         // Idempotent on caller side.
         if (callMethod.Body.Instructions.Any(i =>
@@ -1394,7 +1715,7 @@ static class Program
             im.DeclaringType.FullName == "LuaInterface.LuaFunction" &&
             im.Name == "PopValuesSafe"))
         {
-            return createdPopSafe;
+            return createdPopSafe || rewrotePopSafe;
         }
 
         var instrs = callMethod.Body.Instructions;
@@ -1457,15 +1778,15 @@ static class Program
         }
 
         if (startIdx < 0 || endIdx < startIdx || oldTopLocal == null || retLocal == null)
-            return createdPopSafe;
+            return createdPopSafe || rewrotePopSafe;
 
         if (endIdx + 1 >= instrs.Count)
-            return createdPopSafe;
+            return createdPopSafe || rewrotePopSafe;
 
         var afterBlock = instrs[endIdx + 1];
         int slotCount = endIdx - startIdx + 1;
         if (slotCount < 6)
-            return createdPopSafe;
+            return createdPopSafe || rewrotePopSafe;
 
         instrs[startIdx + 0].OpCode = OpCodes.Ldarg_0;
         instrs[startIdx + 0].Operand = null;
