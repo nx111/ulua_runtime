@@ -225,6 +225,12 @@ LUALIB_API void tolua_getvec3(lua_State* L, int pos, float* x, float* y, float* 
 
 int tolua_index(lua_State* L)
 {
+  if (lua_isnil(L, 2))
+  {
+    lua_pushnil(L);
+    return 1;
+  }
+
   int ret = lua_getmetatable(L, 1);  
 
   while (ret != 0)
@@ -241,7 +247,8 @@ int tolua_index(lua_State* L)
     {                      
       lua_rawgeti(L, -1, 1);        
       lua_pushvalue(L, 1);
-      lua_call(L, 1, -1);                
+      lua_pushvalue(L, 2);
+      lua_call(L, 2, -1);                
       return 1;
       /*lua_rawgeti(L, -1, 1);  
       lua_CFunction fn = lua_tocfunction (L, -1);
