@@ -26,14 +26,33 @@
 #include <lualib.h>
 #include <lauxlib.h>
 
+#ifdef _WIN32
+#include <winsock2.h>
+#ifndef IS_LITTLE_ENDIAN
+#define IS_LITTLE_ENDIAN
+#endif
+/* Windows targets we build for are little-endian. */
+#ifndef htole32
+#define htole32(x) ((uint32_t)(x))
+#endif
+#ifndef htole64
+#define htole64(x) ((uint64_t)(x))
+#endif
+#ifndef le32toh
+#define le32toh(x) ((uint32_t)(x))
+#endif
+#ifndef le64toh
+#define le64toh(x) ((uint64_t)(x))
+#endif
+#else
 #ifdef _ALLBSD_SOURCE
 #include <machine/endian.h>
 #else
 #include <endian.h>
 #endif
-
 #if __BYTE_ORDER == __LITTLE_ENDIAN
 #define IS_LITTLE_ENDIAN
+#endif
 #endif
 
 #define IOSTRING_META "protobuf.IOString"

@@ -427,7 +427,11 @@ static const struct luaL_reg funcs[] =
 
 LUALIB_API int tolua_openlibs(lua_State* L)
 {
+#ifdef _WIN32
 	ulua_tracef("tolua_openlibs loaded pid=%lu", (unsigned long)GetCurrentProcessId());
+#else
+	ulua_tracef("tolua_openlibs loaded");
+#endif
 	luaL_register(L, "tolua", funcs);
 	return 1;
 }

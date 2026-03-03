@@ -3,7 +3,7 @@
 
 set -euo pipefail
 
-API_COMPAT_DEF="-Dlua_tolstring=lua_tolstring_internal"
+API_COMPAT_DEF="-Dlua_tolstring=lua_tolstring_internal -Dlua_pcall=lua_pcall_internal"
 
 mkdir -p window/x86_64
 mkdir -p Plugins/x86_64
@@ -15,12 +15,12 @@ cp src/libluajit.a ../window/x86_64/libluajit.a
 
 cd ../pbc/
 make clean
-make BUILDMODE=static CC="x86_64-w64-mingw32-gcc" CFLAGS="-O2 -fPIC -Wall $API_COMPAT_DEF"
+make lib BUILDMODE=static CC="x86_64-w64-mingw32-gcc" CFLAGS="-O2 -fPIC -Wall $API_COMPAT_DEF"
 cp build/libpbc.a ../window/x86_64/libpbc.a
 
 cd ../cjson/
 make clean
-make BUILDMODE=static CC="x86_64-w64-mingw32-gcc" CFLAGS="-O2 -fPIC -Wall $API_COMPAT_DEF"
+make lib BUILDMODE=static CC="x86_64-w64-mingw32-gcc" CFLAGS="-O2 -fPIC -Wall $API_COMPAT_DEF"
 cp build/libcjson.a ../window/x86_64/libcjson.a
 
 cd ..

@@ -29,6 +29,30 @@
 #define bcread_savetop(L, ls, top) \
   ls->lastline = (BCLine)savestack(L, (top))
 
+/* Map LuaJIT 2.1 opcodes back to LuaJIT 2.0 opcodes. */
+static int bcread_map_v2_opcode(uint8_t op, uint8_t *mapped)
+{
+  if (op <= 15) {
+    *mapped = op;
+    return 1;
+  }
+  /* LuaJIT 2.1-only opcodes that don't exist in 2.0. */
+  if (op == 16 || op == 17 || op == 59 || op == 64) return 0;
+  if (op <= 58) {
+    *mapped = (uint8_t)(op - 2);
+    return 1;
+  }
+  if (op <= 63) {
+    *mapped = (uint8_t)(op - 3);
+    return 1;
+  }
+  if (op <= 96) {
+    *mapped = (uint8_t)(op - 4);
+    return 1;
+  }
+  return 0;
+}
+
 /* -- Input buffer handling ----------------------------------------------- */
 
 /* Throw reader error. */
@@ -308,6 +332,16 @@ static void bcread_bytecode(LexState *ls, GCproto *pt, MSize sizebc)
     MSize i;
     for (i = 1; i < sizebc; i++) bc[i] = lj_bswap(bc[i]);
   }
+  if (bcread_flags(ls) & BCDUMP_F_V2) {
+    MSize i;
+    for (i = 1; i < sizebc; i++) {
+      BCIns ins = bc[i];
+      uint8_t mapped;
+      if (!bcread_map_v2_opcode((uint8_t)bc_op(ins), &mapped))
+	bcread_error(ls, LJ_ERR_BCBAD);
+      bc[i] = (ins & ~0xffu) | (BCIns)mapped;
+    }
+  }
 }
 
 /* Read upvalue refs. */
@@ -422,13 +456,21 @@ static GCproto *bcread_proto(LexState *ls)
 /* Read and check header of bytecode dump. */
 static int bcread_header(LexState *ls)
 {
-  uint32_t flags;
+  uint32_t flags, version;
   bcread_want(ls, 3+5+5);
   if (bcread_byte(ls) != BCDUMP_HEAD2 ||
-      bcread_byte(ls) != BCDUMP_HEAD3 ||
-      bcread_byte(ls) != BCDUMP_VERSION) return 0;
+      bcread_byte(ls) != BCDUMP_HEAD3) return 0;
+  version = bcread_byte(ls);
+  if (version != BCDUMP_VERSION && version != 2) return 0;
   bcread_flags(ls) = flags = bcread_uleb128(ls);
-  if ((flags & ~(BCDUMP_F_KNOWN)) != 0) return 0;
+  if (version == 2) {
+    bcread_flags(ls) |= BCDUMP_F_V2;
+    if ((flags & ~(BCDUMP_F_KNOWN|BCDUMP_F_FR2)) != 0) return 0;
+    /* Accept 32-bit (FR2=0) dumps on 64-bit builds; reject FR2 dumps. */
+    if ((flags & BCDUMP_F_FR2) != 0) return 0;
+  } else {
+    if ((flags & ~(BCDUMP_F_KNOWN)) != 0) return 0;
+  }
   if ((flags & BCDUMP_F_FFI)) {
 #if LJ_HASFFI
     lua_State *L = ls->L;

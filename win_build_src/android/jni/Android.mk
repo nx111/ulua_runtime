@@ -15,6 +15,7 @@ LOCAL_C_INCLUDES += $(LOCAL_PATH)/luasocket/src
 LOCAL_C_INCLUDES += $(LOCAL_PATH)/../../
 
 LOCAL_CPPFLAGS := -03 -ffast-math
+LOCAL_CFLAGS += -Dlua_tolstring=lua_tolstring_internal -Dlua_pcall=lua_pcall_internal
 LOCAL_SRC_FILES := ../../lua_wrap.c \
 				   ../../pb.c \
 				   ../../lpeg.c \
