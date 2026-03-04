@@ -46,6 +46,10 @@
 #include "strbuf.h"
 #include "fpconv.h"
 
+#if defined(_MSC_VER) && !defined(strncasecmp)
+#define strncasecmp _strnicmp
+#endif
+
 #ifndef CJSON_MODNAME
 #define CJSON_MODNAME   "cjson"
 #endif
