@@ -285,6 +285,13 @@ static const LibDefHandler libdef_handlers[] = {
   { NULL,	NULL,		(LibDefFunc)0,		0 }
 };
 
+static int line_eq(const char *line, const char *pat)
+{
+  size_t n = strlen(pat);
+  return !strncmp(line, pat, n) &&
+	 (line[n] == '\0' || line[n] == '\n' || line[n] == '\r');
+}
+
 /* Emit C source code for library function definitions. */
 void emit_lib(BuildCtx *ctx)
 {
@@ -320,11 +327,11 @@ void emit_lib(BuildCtx *ctx)
       /* Simplistic pre-processor. Only handles top-level #if/#endif. */
       if (buf[0] == '#' && buf[1] == 'i' && buf[2] == 'f') {
 	int ok = 1;
-	if (!strcmp(buf, "#if LJ_52\n"))
+	if (line_eq(buf, "#if LJ_52"))
 	  ok = LJ_52;
-	else if (!strcmp(buf, "#if LJ_HASJIT\n"))
+	else if (line_eq(buf, "#if LJ_HASJIT"))
 	  ok = LJ_HASJIT;
-	else if (!strcmp(buf, "#if LJ_HASFFI\n"))
+	else if (line_eq(buf, "#if LJ_HASFFI"))
 	  ok = LJ_HASFFI;
 	if (!ok) {
 	  int lvl = 1;
