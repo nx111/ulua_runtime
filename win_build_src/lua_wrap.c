@@ -20,6 +20,9 @@
 #endif
 
 static int tag = 0;
+
+#ifdef DEBUG
+
 static int ulua_trace_budget = 4000;
 static int ulua_nil_return_budget = 1200;
 static int ulua_pcall_ok_budget = 200;
@@ -45,6 +48,13 @@ static void ulua_tracef(const char* fmt, ...)
     fclose(fp);
     ulua_trace_budget--;
 }
+#else
+
+#define ulua_tracef(...) ((void)0)
+static int ulua_nil_return_budget = 1200;
+static int ulua_pcall_ok_budget = 200;
+
+#endif
 
 
 LUALIB_API int luaL_checkmetatable(lua_State *L,int index) 
