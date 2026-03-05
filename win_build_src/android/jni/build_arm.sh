@@ -21,6 +21,9 @@ NDK_ROOT="${NDK_ROOT%\"}"
 NDK_ROOT="${NDK_ROOT#\"}"
 NDK_ROOT="${NDK_ROOT%\'}"
 NDK_ROOT="${NDK_ROOT#\'}"
+if [[ "$NDK_ROOT" == [A-Za-z]:\\* ]]; then
+  NDK_ROOT="${NDK_ROOT//\\//}"
+fi
 
 MAKE_CMD="${MAKE:-}"
 if [ -z "$MAKE_CMD" ]; then
@@ -108,11 +111,15 @@ echo "APP_ABI := $ABI" > "$SCRIPT_DIR/Application.mk"
 
 pushd "$SCRIPT_DIR/luajit/src" >/dev/null
 "$MAKE_CMD" clean
-"$MAKE_CMD" HOST_CC="$HOST_CC_CMD" \
-  CROSS="$CROSS_PREFIX" \
-  TARGET_SYS=Linux \
-  XCFLAGS="$API_COMPAT_DEF" \
-  TARGET_FLAGS="--sysroot $SYSROOT -march=armv7-a -mfloat-abi=softfp -Wl,--fix-cortex-a8"
+MAKE_VARS=(
+  "HOST_CC=$HOST_CC_CMD"
+  "CROSS=$CROSS_PREFIX"
+  "TARGET_SYS=Linux"
+  "XCFLAGS=$API_COMPAT_DEF"
+  "TARGET_FLAGS=--sysroot $SYSROOT -march=armv7-a -mfloat-abi=softfp -Wl,--fix-cortex-a8"
+)
+echo "LuaJIT SYSROOT: $SYSROOT"
+"$MAKE_CMD" "${MAKE_VARS[@]}"
 cp -f ./libluajit.a ../../libluajit.a
 popd >/dev/null
 

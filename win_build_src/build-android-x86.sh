@@ -26,6 +26,9 @@ NDK_ROOT="${NDK_ROOT%\"}"
 NDK_ROOT="${NDK_ROOT#\"}"
 NDK_ROOT="${NDK_ROOT%\'}"
 NDK_ROOT="${NDK_ROOT#\'}"
+if [[ "$NDK_ROOT" == [A-Za-z]:\\* ]]; then
+  NDK_ROOT="${NDK_ROOT//\\//}"
+fi
 
 NDK_BUILD=""
 if [ -f "$NDK_ROOT/ndk-build.cmd" ] && (command -v cmd.exe >/dev/null 2>&1 || command -v cmd >/dev/null 2>&1); then
@@ -112,11 +115,15 @@ rm -f "$JNI_DIR/libluajit.a"
 
 pushd "$LUAJIT_SRC_DIR" >/dev/null
 "$MAKE_CMD" clean
-"$MAKE_CMD" HOST_CC="$HOST_CC_CMD" \
-  CROSS="$CROSS_PREFIX" \
-  TARGET_SYS=Linux \
-  XCFLAGS="$API_COMPAT_DEF" \
-  TARGET_FLAGS="--sysroot $SYSROOT"
+MAKE_VARS=(
+  "HOST_CC=$HOST_CC_CMD"
+  "CROSS=$CROSS_PREFIX"
+  "TARGET_SYS=Linux"
+  "XCFLAGS=$API_COMPAT_DEF"
+  "TARGET_FLAGS=--sysroot $SYSROOT"
+)
+echo "LuaJIT SYSROOT: $SYSROOT"
+"$MAKE_CMD" "${MAKE_VARS[@]}"
 cp -f libluajit.a ../../libluajit.a
 popd >/dev/null
 
