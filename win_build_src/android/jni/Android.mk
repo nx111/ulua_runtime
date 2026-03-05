@@ -14,7 +14,7 @@ LOCAL_C_INCLUDES += $(LOCAL_PATH)/cjson
 LOCAL_C_INCLUDES += $(LOCAL_PATH)/luasocket/src
 LOCAL_C_INCLUDES += $(LOCAL_PATH)/../../
 
-LOCAL_CPPFLAGS := -03 -ffast-math
+LOCAL_CPPFLAGS := -O3 -ffast-math
 LOCAL_CFLAGS += -Dlua_tolstring=lua_tolstring_internal -Dlua_pcall=lua_pcall_internal
 LOCAL_SRC_FILES := ../../lua_wrap.c \
 				   ../../pb.c \
@@ -51,7 +51,7 @@ LOCAL_SRC_FILES := ../../lua_wrap.c \
 				   ./luasocket/src/timeout.c \
 				   ./luasocket/src/udp.c \
 				   ./luasocket/src/unix.c \
-				   ./luasocket/src/usocket.c \
+				   ./luasocket/src/usocket.c
 
 LOCAL_WHOLE_STATIC_LIBRARIES += libluajit
 include $(BUILD_SHARED_LIBRARY)
