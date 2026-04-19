@@ -9,7 +9,7 @@ ANDROID_DIR="$ROOT_DIR/android"
 JNI_DIR="$ANDROID_DIR/jni"
 LUAJIT_SRC_DIR="$JNI_DIR/luajit/src"
 ABI="armeabi-v7a"
-API_COMPAT_DEF="-Dlua_tolstring=lua_tolstring_internal -Dlua_pcall=lua_pcall_internal"
+API_COMPAT_DEF="-Dlua_tolstring=lua_tolstring_internal -Dlua_pcall=lua_pcall_internal -DluaL_reg=luaL_Reg"
 
 NDK_ROOT="${ANDROID_NDK_ROOT:-${ANDROID_NDK_HOME:-${NDK:-}}}"
 echo "NDK_ROOT=${NDK_ROOT}"

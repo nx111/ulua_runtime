@@ -1,6 +1,6 @@
 /*
 ** Table handling.
-** Copyright (C) 2005-2014 Mike Pall. See Copyright Notice in luajit.h
+** Copyright (C) 2005-2017 Mike Pall. See Copyright Notice in luajit.h
 **
 ** Major portions taken verbatim or adapted from the Lua interpreter.
 ** Copyright (C) 1994-2008 Lua.org, PUC-Rio. See Copyright Notice in lua.h
@@ -13,6 +13,8 @@
 #include "lj_gc.h"
 #include "lj_err.h"
 #include "lj_tab.h"
+
+#include <math.h>
 
 /* -- Object hashing ------------------------------------------------------ */
 
@@ -28,8 +30,12 @@ static LJ_AINLINE Node *hashmask(const GCtab *t, uint32_t hash)
 
 #define hashlohi(t, lo, hi)	hashmask((t), hashrot((lo), (hi)))
 #define hashnum(t, o)		hashlohi((t), (o)->u32.lo, ((o)->u32.hi << 1))
-#define hashptr(t, p)		hashlohi((t), u32ptr(p), u32ptr(p) + HASH_BIAS)
+#if LJ_GC64
+#define hashgcref(t, r) \
+  hashlohi((t), (uint32_t)gcrefu(r), (uint32_t)(gcrefu(r) >> 32))
+#else
 #define hashgcref(t, r)		hashlohi((t), gcrefu(r), gcrefu(r) + HASH_BIAS)
+#endif
 
 /* Hash an arbitrary key and return its anchor position in the hash table. */
 static Node *hashkey(const GCtab *t, cTValue *key)
@@ -58,8 +64,8 @@ static LJ_AINLINE void newhpart(lua_State *L, GCtab *t, uint32_t hbits)
     lj_err_msg(L, LJ_ERR_TABOV);
   hsize = 1u << hbits;
   node = lj_mem_newvec(L, hsize, Node);
-  setmref(node->freetop, &node[hsize]);
   setmref(t->node, node);
+  setfreetop(t, node, &node[hsize]);
   t->hmask = hsize-1;
 }
 
@@ -98,6 +104,7 @@ static GCtab *newtab(lua_State *L, uint32_t asize, uint32_t hbits)
   GCtab *t;
   /* First try to colocate the array part. */
   if (LJ_MAX_COLOSIZE != 0 && asize > 0 && asize <= LJ_MAX_COLOSIZE) {
+    Node *nilnode;
     lua_assert((sizeof(GCtab) & 7) == 0);
     t = (GCtab *)lj_mem_newgco(L, sizetabcolo(asize));
     t->gct = ~LJ_TTAB;
@@ -107,8 +114,13 @@ static GCtab *newtab(lua_State *L, uint32_t asize, uint32_t hbits)
     setgcrefnull(t->metatable);
     t->asize = asize;
     t->hmask = 0;
-    setmref(t->node, &G(L)->nilnode);
+    nilnode = &G(L)->nilnode;
+    setmref(t->node, nilnode);
+#if LJ_GC64
+    setmref(t->freetop, nilnode);
+#endif
   } else {  /* Otherwise separately allocate the array part. */
+    Node *nilnode;
     t = lj_mem_newobj(L, GCtab);
     t->gct = ~LJ_TTAB;
     t->nomm = (uint8_t)~0;
@@ -117,7 +129,11 @@ static GCtab *newtab(lua_State *L, uint32_t asize, uint32_t hbits)
     setgcrefnull(t->metatable);
     t->asize = 0;  /* In case the array allocation fails. */
     t->hmask = 0;
-    setmref(t->node, &G(L)->nilnode);
+    nilnode = &G(L)->nilnode;
+    setmref(t->node, nilnode);
+#if LJ_GC64
+    setmref(t->freetop, nilnode);
+#endif
     if (asize > 0) {
       if (asize > LJ_MAX_ASIZE)
 	lj_err_msg(L, LJ_ERR_TABOV);
@@ -147,6 +163,12 @@ GCtab *lj_tab_new(lua_State *L, uint32_t asize, uint32_t hbits)
   clearapart(t);
   if (t->hmask > 0) clearhpart(t);
   return t;
+}
+
+/* The API of this function conforms to lua_createtable(). */
+GCtab *lj_tab_new_ah(lua_State *L, int32_t a, int32_t h)
+{
+  return lj_tab_new(L, (uint32_t)(a > 0 ? a+1 : 0), hsize2hbits(h));
 }
 
 #if LJ_HASJIT
@@ -185,7 +207,7 @@ GCtab * LJ_FASTCALL lj_tab_dup(lua_State *L, const GCtab *kt)
     Node *node = noderef(t->node);
     Node *knode = noderef(kt->node);
     ptrdiff_t d = (char *)node - (char *)knode;
-    setmref(node->freetop, (Node *)((char *)noderef(knode->freetop) + d));
+    setfreetop(t, node, (Node *)((char *)getfreetop(kt, knode) + d));
     for (i = 0; i <= hmask; i++) {
       Node *kn = &knode[i];
       Node *n = &node[i];
@@ -196,6 +218,17 @@ GCtab * LJ_FASTCALL lj_tab_dup(lua_State *L, const GCtab *kt)
     }
   }
   return t;
+}
+
+/* Clear a table. */
+void LJ_FASTCALL lj_tab_clear(GCtab *t)
+{
+  clearapart(t);
+  if (t->hmask > 0) {
+    Node *node = noderef(t->node);
+    setfreetop(t, node, &node[t->hmask+1]);
+    clearhpart(t);
+  }
 }
 
 /* Free a table. */
@@ -214,7 +247,7 @@ void LJ_FASTCALL lj_tab_free(global_State *g, GCtab *t)
 /* -- Table resizing ------------------------------------------------------ */
 
 /* Resize a table to fit the new array/hash part sizes. */
-static void resizetab(lua_State *L, GCtab *t, uint32_t asize, uint32_t hbits)
+void lj_tab_resize(lua_State *L, GCtab *t, uint32_t asize, uint32_t hbits)
 {
   Node *oldnode = noderef(t->node);
   uint32_t oldasize = t->asize;
@@ -247,6 +280,9 @@ static void resizetab(lua_State *L, GCtab *t, uint32_t asize, uint32_t hbits)
   } else {
     global_State *g = G(L);
     setmref(t->node, &g->nilnode);
+#if LJ_GC64
+    setmref(t->freetop, &g->nilnode);
+#endif
     t->hmask = 0;
   }
   if (asize < oldasize) {  /* Array part shrinks? */
@@ -348,7 +384,7 @@ static void rehashtab(lua_State *L, GCtab *t, cTValue *ek)
   asize += countint(ek, bins);
   na = bestasize(bins, &asize);
   total -= na;
-  resizetab(L, t, asize, hsize2hbits(total));
+  lj_tab_resize(L, t, asize, hsize2hbits(total));
 }
 
 #if LJ_HASFFI
@@ -360,7 +396,7 @@ void lj_tab_rehash(lua_State *L, GCtab *t)
 
 void lj_tab_reasize(lua_State *L, GCtab *t, uint32_t nasize)
 {
-  resizetab(L, t, nasize+1, t->hmask > 0 ? lj_fls(t->hmask)+1 : 0);
+  lj_tab_resize(L, t, nasize+1, t->hmask > 0 ? lj_fls(t->hmask)+1 : 0);
 }
 
 /* -- Table getters ------------------------------------------------------- */
@@ -428,7 +464,7 @@ TValue *lj_tab_newkey(lua_State *L, GCtab *t, cTValue *key)
   Node *n = hashkey(t, key);
   if (!tvisnil(&n->val) || t->hmask == 0) {
     Node *nodebase = noderef(t->node);
-    Node *collide, *freenode = noderef(nodebase->freetop);
+    Node *collide, *freenode = getfreetop(t, nodebase);
     lua_assert(freenode >= nodebase && freenode <= nodebase+t->hmask+1);
     do {
       if (freenode == nodebase) {  /* No free node found? */
@@ -436,10 +472,11 @@ TValue *lj_tab_newkey(lua_State *L, GCtab *t, cTValue *key)
 	return lj_tab_set(L, t, key);  /* Retry key insertion. */
       }
     } while (!tvisnil(&(--freenode)->key));
-    setmref(nodebase->freetop, freenode);
+    setfreetop(t, nodebase, freenode);
     lua_assert(freenode != &G(L)->nilnode);
     collide = hashkey(t, &n->key);
     if (collide != n) {  /* Colliding node not the main node? */
+      Node *nn;
       while (noderef(collide->next) != n)  /* Find predecessor. */
 	collide = nextnode(collide);
       setmref(collide->next, freenode);  /* Relink chain. */
@@ -449,16 +486,63 @@ TValue *lj_tab_newkey(lua_State *L, GCtab *t, cTValue *key)
       freenode->next = n->next;
       setmref(n->next, NULL);
       setnilV(&n->val);
-      /* Rechain pseudo-resurrected string keys with colliding hashes. */
-      while (nextnode(freenode)) {
-	Node *nn = nextnode(freenode);
-	if (tvisstr(&nn->key) && !tvisnil(&nn->val) &&
-	    hashstr(t, strV(&nn->key)) == n) {
-	  freenode->next = nn->next;
-	  nn->next = n->next;
-	  setmref(n->next, nn);
-	} else {
+      /*
+      ** Nodes after n might have n as their main node, and need rechaining
+      ** back onto n. We make use of the following property of tables: for all
+      ** nodes m, at least one of the following four statements is true:
+      **  1. tvisnil(&m->key)  NB: tvisnil(&m->val) is a stronger statement
+      **  2. tvisstr(&m->key)
+      **  3. tvisstr(&main(m)->key)
+      **  4. main(m) == main(main(m))
+      ** Initially, we need to rechain any nn which has main(nn) == n. As
+      ** main(n) != n (because collide != n earlier), main(nn) == n requires
+      ** either statement 2 or statement 3 to be true about nn.
+      */
+      if (!tvisstr(&n->key)) {
+	/* Statement 3 is not true, so only need to consider string keys. */
+	while ((nn = nextnode(freenode))) {
+	  if (tvisstr(&nn->key) && !tvisnil(&nn->val) &&
+	      hashstr(t, strV(&nn->key)) == n) {
+	    goto rechain;
+	  }
 	  freenode = nn;
+	}
+      } else {
+	/* Statement 3 is true, so need to consider all types of key. */
+	while ((nn = nextnode(freenode))) {
+	  if (!tvisnil(&nn->val) && hashkey(t, &nn->key) == n) {
+	  rechain:
+	    freenode->next = nn->next;
+	    nn->next = n->next;
+	    setmref(n->next, nn);
+	    /*
+	    ** Rechaining one node onto n creates a new dilemma: we now need
+	    ** to rechain any nn which has main(nn) == n OR has main(nn) equal
+	    ** to any node which has already been rechained. Furthermore, at
+	    ** least one of n and n->next will have a string key, so all types
+	    ** of nn key need to be considered. Rather than testing whether
+	    ** main(nn) definitely _is_ in the new chain, we test whether it
+	    ** might _not_ be in the old chain, and if so re-link it into
+	    ** the correct chain.
+	    */
+	    while ((nn = nextnode(freenode))) {
+	      if (!tvisnil(&nn->val)) {
+		Node *mn = hashkey(t, &nn->key);
+		if (mn != freenode && mn != nn) {
+		  freenode->next = nn->next;
+		  nn->next = mn->next;
+		  setmref(mn->next, nn);
+		} else {
+		  freenode = nn;
+		}
+	      } else {
+		freenode = nn;
+	      }
+	    }
+	    break;
+	  } else {
+	    freenode = nn;
+	  }
 	}
       }
     } else {  /* Otherwise use free node. */
@@ -629,3 +713,85 @@ MSize LJ_FASTCALL lj_tab_len(GCtab *t)
   return unbound_search(t, j);
 }
 
+
+GCtab * LJ_FASTCALL lj_tab_clone(lua_State *L, const GCtab *src)
+{
+  return lj_tab_dup(L, src);
+}
+
+int LJ_FASTCALL lj_tab_isarray(const GCtab *src)
+{
+  Node *node;
+  cTValue *o;
+  ptrdiff_t i;
+
+  node = noderef(src->node);
+  for (i = (ptrdiff_t)src->hmask; i >= 0; i--)
+    if (!tvisnil(&node[i].val)) {
+      o = &node[i].key;
+      if (LJ_UNLIKELY(tvisint(o))) {
+        continue;
+      }
+      if (LJ_UNLIKELY(tvisnum(o))) {
+        lua_Number n = numberVnum(o);
+        if (LJ_LIKELY(rint((double) n) == n)) {
+          continue;
+        }
+      }
+      return 0;
+    }
+
+  return 1;
+}
+
+MSize LJ_FASTCALL lj_tab_nkeys(const GCtab *t)
+{
+  MSize narr = (MSize)t->asize;
+  cTValue *e;
+  Node *node;
+  MSize i, cnt = 0;
+
+  e = tvref(t->array);
+  for (i = 0; i < narr; i++)
+    if (LJ_LIKELY(!tvisnil(&e[i])))
+      cnt++;
+
+  if (t->hmask <= 0)
+    return cnt;
+
+  node = noderef(t->node);
+  for (i = 0; i <= (MSize)t->hmask; i++) {
+    Node *n = &node[i];
+    if (LJ_LIKELY(!tvisnil(&n->val))) {
+      cnt++;
+    }
+  }
+
+  return cnt;
+}
+
+int LJ_FASTCALL lj_tab_isempty(const GCtab *t)
+{
+  MSize narr = (MSize)t->asize;
+  cTValue *e;
+  Node *node;
+  MSize i;
+
+  e = tvref(t->array);
+  for (i = 0; i < narr; i++)
+    if (LJ_LIKELY(!tvisnil(&e[i])))
+      return 0;
+
+  if (t->hmask <= 0)
+    return 1;
+
+  node = noderef(t->node);
+  for (i = 0; i <= (MSize)t->hmask; i++) {
+    Node *n = &node[i];
+    if (LJ_LIKELY(!tvisnil(&n->val))) {
+      return 0;
+    }
+  }
+
+  return 1;
+}
