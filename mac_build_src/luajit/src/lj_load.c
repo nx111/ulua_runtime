@@ -5,6 +5,7 @@
 
 #include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #define lj_load_c
 #define LUA_CORE
@@ -22,6 +23,10 @@
 #include "lj_lex.h"
 #include "lj_bcdump.h"
 #include "lj_parse.h"
+
+LUALIB_API char* tolua_convertbytecodeex(const char *buff, int sz, int target_fr2, int *out_sz, int *error_code);
+LUALIB_API const char* tolua_getlastbytecodedebug(void);
+LUALIB_API const char* tolua_getbytecodeerrorstr(int error_code);
 
 /* -- Load Lua source code and bytecode ----------------------------------- */
 
@@ -146,7 +151,34 @@ LUALIB_API int luaL_loadbufferx(lua_State *L, const char *buf, size_t size,
 LUALIB_API int luaL_loadbuffer(lua_State *L, const char *buf, size_t size,
 			       const char *name)
 {
-  return luaL_loadbufferx(L, buf, size, name, NULL);
+  int status = luaL_loadbufferx(L, buf, size, name, NULL);
+#if LJ_FR2
+  if (status == LUA_ERRSYNTAX && buf != NULL && size > 4 &&
+      (uint8_t)buf[0] == BCDUMP_HEAD1 &&
+      (uint8_t)buf[1] == BCDUMP_HEAD2 &&
+      (uint8_t)buf[2] == BCDUMP_HEAD3) {
+    int patched_sz = 0;
+    int conv_status = 0;
+    char *patched = tolua_convertbytecodeex(buf, (int)size, 1, &patched_sz, &conv_status);
+    if (patched != NULL) {
+      lua_pop(L, 1);  /* Drop previous incompatible-bytecode error. */
+      status = luaL_loadbufferx(L, patched, (size_t)patched_sz, name, NULL);
+      free(patched);
+    } else if (conv_status != 0) {
+      const char *orig = lua_tostring(L, -1);
+      const char *detail = tolua_getlastbytecodedebug();
+      const char *ename = tolua_getbytecodeerrorstr(conv_status);
+      if (detail && detail[0]) {
+	lua_pushfstring(L, "%s\n[tolua-bytecode] %s (%s)", orig ? orig : "", detail, ename ? ename : "conv_error");
+	lua_replace(L, -2);
+      } else if (ename) {
+	lua_pushfstring(L, "%s\n[tolua-bytecode] conversion failed (%s)", orig ? orig : "", ename);
+	lua_replace(L, -2);
+      }
+    }
+  }
+#endif
+  return status;
 }
 
 LUALIB_API int luaL_loadstring(lua_State *L, const char *s)
@@ -165,4 +197,3 @@ LUA_API int lua_dump(lua_State *L, lua_Writer writer, void *data)
   else
     return 1;
 }
-
