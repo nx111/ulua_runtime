@@ -518,8 +518,12 @@ LUALIB_API int lua_pcall(lua_State* L, int nargs, int nresults, int errfunc)
 #include <stdint.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <string.h>
 #include "lj_obj.h"
 #include "lj_bc.h"
+#if defined(__ANDROID__)
+#include <android/log.h>
+#endif
 
 #ifndef TOLUA_BCCONV_OK
 #define TOLUA_BCCONV_OK                         0
@@ -537,6 +541,24 @@ LUALIB_API int lua_pcall(lua_State* L, int nargs, int nresults, int errfunc)
 #endif
 
 static char tolua_last_bytecode_debug[1024];
+static unsigned int tolua_conv_stat_proto_total = 0;
+static unsigned int tolua_conv_stat_insert_copy_retry = 0;
+static unsigned int tolua_conv_stat_last_firstline = 0;
+static int ulua_repack_log_budget = 0;
+static int ulua_focus_firstline = 2616;
+static int ulua_focus_repack_only = 1;
+
+static unsigned long long tolua_fnv1a64(const uint8_t *data, size_t len)
+{
+  size_t i;
+  unsigned long long h = 1469598103934665603ULL;
+  if (data == NULL) return 0ULL;
+  for (i = 0; i < len; i++) {
+    h ^= (unsigned long long)data[i];
+    h *= 1099511628211ULL;
+  }
+  return h;
+}
 
 static void tolua_setbytecodedebug(const char *fmt, ...)
 {
@@ -626,6 +648,7 @@ typedef struct tolua_bcdebug_ctx {
   size_t chunk_name_len;
   uint32_t proto_index;
   uint8_t proto_flags;
+  uint32_t proto_firstline;
 } tolua_bcdebug_ctx;
 
 #define TOLUA_BCCONV_INTERNAL_INSERT_COPY 1001
@@ -725,14 +748,68 @@ static int tolua_schedule_insert_copies(const tolua_bcdebug_ctx *ctx, uint32_t p
   return 1;
 }
 
-#ifdef TOLUA_REPACK_DEBUG
-#define TOLUA_REPACK_LOG(ctx, pc, fmt, ...) \
-  fprintf(stderr, "[repack] proto=%u pc=%u " fmt "\n", \
-          (unsigned int)((ctx) != NULL ? (ctx)->proto_index : 0u), \
-          (unsigned int)(pc), ##__VA_ARGS__)
+static int tolua_chunk_name_contains(const char *name, size_t len, const char *needle)
+{
+  size_t nlen;
+  size_t i;
+  if (name == NULL || needle == NULL) return 0;
+  nlen = strlen(needle);
+  if (nlen == 0 || len < nlen) return 0;
+  for (i = 0; i + nlen <= len; i++) {
+    if (memcmp(name + i, needle, nlen) == 0) return 1;
+  }
+  return 0;
+}
+
+static int tolua_should_trace_repack(const tolua_bcdebug_ctx *ctx)
+{
+  (void)ctx;
+  return 1;
+}
+
+static int ulua_should_emit_repack_log(const tolua_bcdebug_ctx *ctx, uint32_t pc, const char *detail)
+{
+  if (!ulua_focus_repack_only) return 1;
+  if (ctx == NULL) return 0;
+  if ((int)ctx->proto_firstline != ulua_focus_firstline) return 0;
+  if (pc <= 48) return 1;
+  if (detail == NULL) return 0;
+  if (strstr(detail, "patch_begin") != NULL) return 1;
+  if (strstr(detail, "patch_end") != NULL) return 1;
+  if (strstr(detail, "force copy-fallback") != NULL) return 1;
+  if (strstr(detail, "no skip mirrored") != NULL) return 1;
+  if (strstr(detail, "reject existing FR2 slice") != NULL) return 1;
+  return 0;
+}
+
+static void tolua_repack_log(const tolua_bcdebug_ctx *ctx, uint32_t pc, const char *fmt, ...)
+{
+  char detail[512];
+  va_list argp;
+  if (!tolua_should_trace_repack(ctx)) return;
+  if (ulua_repack_log_budget <= 0) return;
+  va_start(argp, fmt);
+  vsnprintf(detail, sizeof(detail), fmt, argp);
+  va_end(argp);
+  if (!ulua_should_emit_repack_log(ctx, pc, detail)) return;
+#if defined(__ANDROID__)
+  __android_log_print(ANDROID_LOG_INFO, "ulua-bytecode",
+    "repack proto=%u firstline=%u pc=%u %s",
+    (unsigned int)((ctx != NULL) ? ctx->proto_index : 0u),
+    (unsigned int)((ctx != NULL) ? ctx->proto_firstline : 0u),
+    (unsigned int)pc,
+    detail);
 #else
-#define TOLUA_REPACK_LOG(ctx, pc, fmt, ...) ((void)0)
+  fprintf(stderr, "[ulua-repack] proto=%u firstline=%u pc=%u %s\n",
+    (unsigned int)((ctx != NULL) ? ctx->proto_index : 0u),
+    (unsigned int)((ctx != NULL) ? ctx->proto_firstline : 0u),
+    (unsigned int)pc,
+    detail);
 #endif
+  ulua_repack_log_budget--;
+}
+
+#define TOLUA_REPACK_LOG(ctx, pc, fmt, ...) tolua_repack_log((ctx), (pc), (fmt), ##__VA_ARGS__)
 
 static const char *tolua_bc_opname(BCOp op)
 {
@@ -764,12 +841,13 @@ static int tolua_failbytecodeproto(const tolua_bcdebug_ctx *ctx, uint32_t pc,
   va_end(argp);
 
   tolua_setbytecodedebug(
-      "bytecode conversion failed (%s): %s [chunk=%.*s, proto=%u, pc=%u, op=%s, raw=0x%08x, a=%u, b=%u, c=%u, d=%u]",
+      "bytecode conversion failed (%s): %s [chunk=%.*s, proto=%u, firstline=%u, pc=%u, op=%s, raw=0x%08x, a=%u, b=%u, c=%u, d=%u]",
       tolua_getbytecodeerrorstr(error_code),
       detail,
       (int)((ctx != NULL && ctx->chunk_name != NULL) ? ctx->chunk_name_len : 10),
       (ctx != NULL && ctx->chunk_name != NULL) ? ctx->chunk_name : "<stripped>",
       (ctx != NULL) ? ctx->proto_index : 0u,
+      (ctx != NULL) ? ctx->proto_firstline : 0u,
       pc,
       tolua_bc_opname(op),
       (unsigned int)ins,
@@ -1947,6 +2025,21 @@ static int tolua_shift_proto_slice_right_for_fr2(uint8_t *buf, size_t bc_pos, ui
   if (old_first > old_last) return TOLUA_BCCONV_OK;
   consumer_ins = (BCIns)tolua_read_ins(buf + bc_pos + (size_t)pc * 4, be);
   consumer_op = bc_op(consumer_ins);
+#if defined(__ANDROID__)
+  if (ctx != NULL && ctx->proto_firstline == 2616 && consumer_op == BC_CALL && pc <= 48) {
+    BCIns prev1 = (pc >= 1) ? (BCIns)tolua_read_ins(buf + bc_pos + (size_t)(pc - 1) * 4, be) : 0;
+    BCIns prev2 = (pc >= 2) ? (BCIns)tolua_read_ins(buf + bc_pos + (size_t)(pc - 2) * 4, be) : 0;
+    __android_log_print(ANDROID_LOG_INFO, "ulua-bytecode",
+      "focus2616 enter pc=%u a=%u b=%u c=%u old=[%u,%u] p1=%s(%u,%u,%u) p2=%s(%u,%u,%u)",
+      (unsigned int)pc,
+      (unsigned int)bc_a(consumer_ins),
+      (unsigned int)bc_b(consumer_ins),
+      (unsigned int)bc_c(consumer_ins),
+      (unsigned int)old_first, (unsigned int)old_last,
+      tolua_bc_opname(bc_op(prev1)), (unsigned int)bc_a(prev1), (unsigned int)bc_b(prev1), (unsigned int)bc_c(prev1),
+      tolua_bc_opname(bc_op(prev2)), (unsigned int)bc_a(prev2), (unsigned int)bc_b(prev2), (unsigned int)bc_c(prev2));
+  }
+#endif
   if (old_first == old_last && pc > 0) {
     BCIns prev = (BCIns)tolua_read_ins(buf + bc_pos + (size_t)(pc - 1) * 4, be);
     BCOp prev_op = bc_op(prev);
@@ -2030,6 +2123,41 @@ static int tolua_shift_proto_slice_right_for_fr2(uint8_t *buf, size_t bc_pos, ui
       return TOLUA_BCCONV_OK;
     }
   }
+  if (consumer_op == BC_CALL && bc_c(consumer_ins) == 3 &&
+      old_last == (BCReg)(old_first + 1) && pc >= 3) {
+    BCIns prev1 = (BCIns)tolua_read_ins(buf + bc_pos + (size_t)(pc - 1) * 4, be);
+    BCIns prev2 = (BCIns)tolua_read_ins(buf + bc_pos + (size_t)(pc - 2) * 4, be);
+    BCIns prev3 = (BCIns)tolua_read_ins(buf + bc_pos + (size_t)(pc - 3) * 4, be);
+    BCOp prev1_op = bc_op(prev1);
+    BCOp prev2_op = bc_op(prev2);
+    BCReg base = bc_a(consumer_ins);
+    BCReg src_reg = bc_d(prev3);
+    int prev1_is_const =
+      prev1_op == BC_KSTR || prev1_op == BC_KSHORT ||
+      prev1_op == BC_KNUM || prev1_op == BC_KPRI ||
+      prev1_op == BC_KCDATA;
+
+    /* Dot-call shape with explicit self and constant arg:
+       MOV self<-obj; TGET* func<-obj; K* arg2; CALL(C=3).
+       existing-slice fast-path can falsely reuse stale regs here on FR2. */
+    if (bc_op(prev3) == BC_MOV &&
+        bc_a(prev3) == old_first &&
+        (prev2_op == BC_TGETS || prev2_op == BC_TGETV || prev2_op == BC_TGETB) &&
+        bc_a(prev2) == base &&
+        bc_b(prev2) == src_reg &&
+        prev1_is_const &&
+        bc_a(prev1) == old_last &&
+        ctx != NULL &&
+        (int)ctx->proto_firstline == ulua_focus_firstline &&
+        pc <= 24) {
+      allow_existing_slice = 0;
+      force_copy_fallback = 1;
+      TOLUA_REPACK_LOG(ctx, pc,
+                       "force copy-fallback for method-const CALL(C=3) base=%u src=%u old=[%u,%u]",
+                       (unsigned int)base, (unsigned int)src_reg,
+                       (unsigned int)old_first, (unsigned int)old_last);
+    }
+  }
   if (consumer_op == BC_CALL && bc_c(consumer_ins) == 2 &&
       old_first == old_last && pc >= 2) {
     BCIns prev1 = (BCIns)tolua_read_ins(buf + bc_pos + (size_t)(pc - 1) * 4, be);
@@ -2064,11 +2192,23 @@ static int tolua_shift_proto_slice_right_for_fr2(uint8_t *buf, size_t bc_pos, ui
          prev2_op == BC_UGET || prev2_op == BC_GGET) &&
         bc_a(prev2) == base &&
         ((prev2_op != BC_TGETS && prev2_op != BC_TGETV && prev2_op != BC_TGETB) ||
-         bc_b(prev2) == base)) {
+         (bc_b(prev2) == base && bc_d(prev1) == bc_b(prev2)))) {
       TOLUA_REPACK_LOG(ctx, pc,
                        "skip FR2 arg shift for mirrored direct CALL(C=2) old=%u base=%u src=%u",
                        (unsigned int)old_first, (unsigned int)base, (unsigned int)bc_d(prev1));
       return TOLUA_BCCONV_OK;
+    }
+    if (tolua_reg_is_passthrough_seed_before_pc(buf, bc_pos, be, pc, bc_d(prev1)) &&
+        prev1_op == BC_MOV &&
+        bc_a(prev1) == old_first &&
+        (prev2_op == BC_TGETS || prev2_op == BC_TGETV || prev2_op == BC_TGETB) &&
+        bc_a(prev2) == base &&
+        bc_b(prev2) == base &&
+        bc_d(prev1) != bc_b(prev2)) {
+      TOLUA_REPACK_LOG(ctx, pc,
+                       "no skip mirrored CALL(C=2): src mismatch old=%u base=%u src=%u tbl=%u",
+                       (unsigned int)old_first, (unsigned int)base, (unsigned int)bc_d(prev1),
+                       (unsigned int)bc_b(prev2));
     }
 
     /* Keep table-parent keyed TDUP one-arg calls as-is:
@@ -5177,7 +5317,26 @@ static int tolua_patch_proto_v1_fr2(uint8_t *buf, size_t bc_pos, uint32_t numbc,
   uint32_t pc = 0;
   int status = TOLUA_BCCONV_OK;
 
+  tolua_conv_stat_proto_total++;
+  tolua_conv_stat_last_firstline = (ctx != NULL) ? ctx->proto_firstline : 0u;
+
+ #if defined(__ANDROID__)
+  if (tolua_should_trace_repack(ctx) &&
+      (!ulua_focus_repack_only ||
+       (ctx != NULL && (int)ctx->proto_firstline == ulua_focus_firstline))) {
+    __android_log_print(ANDROID_LOG_INFO, "ulua-bytecode",
+      "patch_proto_enter proto=%u firstline=%u numbc=%u remap_v1=%d",
+      (unsigned int)((ctx != NULL) ? ctx->proto_index : 0u),
+      (unsigned int)((ctx != NULL) ? ctx->proto_firstline : 0u),
+      (unsigned int)numbc,
+      remap_v1);
+  }
+ #endif
+
   if (remap_v1) {
+    TOLUA_REPACK_LOG(ctx, 0, "patch_begin remap_v1=1 numbc=%u framesize=%u",
+                     (unsigned int)numbc,
+                     (unsigned int)(framesize_io != NULL ? *framesize_io : 0u));
     for (pc = 0; pc < numbc; pc++) {
       uint8_t *slot = buf + bc_pos + (size_t)pc * 4;
       BCIns ins = (BCIns)tolua_read_ins(slot, be);
@@ -5192,6 +5351,11 @@ static int tolua_patch_proto_v1_fr2(uint8_t *buf, size_t bc_pos, uint32_t numbc,
       setbc_op(&ins, op);
       tolua_write_ins(slot, (uint32_t)ins, be);
     }
+  }
+  else {
+    TOLUA_REPACK_LOG(ctx, 0, "patch_begin remap_v1=0 numbc=%u framesize=%u",
+                     (unsigned int)numbc,
+                     (unsigned int)(framesize_io != NULL ? *framesize_io : 0u));
   }
 
   for (pc = 0; pc < numbc; pc++) {
@@ -5363,6 +5527,9 @@ static int tolua_patch_proto_v1_fr2(uint8_t *buf, size_t bc_pos, uint32_t numbc,
   }
 
   free(targets);
+  TOLUA_REPACK_LOG(ctx, 0, "patch_end numbc=%u framesize=%u",
+                   (unsigned int)numbc,
+                   (unsigned int)(framesize_io != NULL ? *framesize_io : 0u));
   return TOLUA_BCCONV_OK;
 }
 
@@ -9573,6 +9740,7 @@ static int tolua_convert_bytecode_inplace(uint8_t **buf_io, size_t *len_io, int 
       ctx.chunk_name_len = chunk_name_len;
       ctx.proto_index = proto_index;
       ctx.proto_flags = 0;
+      ctx.proto_firstline = 0;
 
       if (!tolua_read_uleb128(buf, len, &pos, &proto_len)) {
         return tolua_failbytecode(TOLUA_BCCONV_ERR_MALFORMED_CHUNK,
@@ -9626,6 +9794,7 @@ static int tolua_convert_bytecode_inplace(uint8_t **buf_io, size_t *len_io, int 
                                       "proto %u has malformed debug line info",
                                       (unsigned int)proto_index);
           }
+          ctx.proto_firstline = firstline;
         }
         if (p > proto_end) {
           return tolua_failbytecode(TOLUA_BCCONV_ERR_MALFORMED_CHUNK,
@@ -9650,6 +9819,7 @@ static int tolua_convert_bytecode_inplace(uint8_t **buf_io, size_t *len_io, int 
         uint8_t *rebuilt = NULL;
         size_t rebuilt_size = 0;
         int rebuild_status = TOLUA_BCCONV_OK;
+        tolua_conv_stat_insert_copy_retry++;
 
         rebuilt = tolua_rebuild_chunk_with_insert_copy(buf, len, &rebuilt_size, &rebuild_status);
         if (rebuilt == NULL) return rebuild_status;
@@ -9711,10 +9881,11 @@ static int tolua_convert_bytecode_inplace(uint8_t **buf_io, size_t *len_io, int 
     size_t framesize_pos = 0;
     uint32_t numkgc = 0, numkn = 0, numbc = 0;
     uint32_t sizedbg = 0;
-    ctx.chunk_name = (!strip && chunk_name_len != 0) ? (const char *)(buf + chunk_name_pos) : NULL;
-    ctx.chunk_name_len = chunk_name_len;
-    ctx.proto_index = proto_index;
-    ctx.proto_flags = 0;
+      ctx.chunk_name = (!strip && chunk_name_len != 0) ? (const char *)(buf + chunk_name_pos) : NULL;
+      ctx.chunk_name_len = chunk_name_len;
+      ctx.proto_index = proto_index;
+      ctx.proto_flags = 0;
+      ctx.proto_firstline = 0;
 
     if (!tolua_read_uleb128(buf, len, &pos, &proto_len)) {
       return tolua_failbytecode(TOLUA_BCCONV_ERR_MALFORMED_CHUNK,
@@ -9760,15 +9931,16 @@ static int tolua_convert_bytecode_inplace(uint8_t **buf_io, size_t *len_io, int 
                                   "proto %u has malformed debug-size field",
                                   (unsigned int)proto_index);
       }
-      if (sizedbg) {
-        uint32_t firstline = 0, numline = 0;
-        if (!tolua_read_uleb128(buf, len, &p, &firstline) ||
-            !tolua_read_uleb128(buf, len, &p, &numline)) {
-          return tolua_failbytecode(TOLUA_BCCONV_ERR_MALFORMED_CHUNK,
-                                    "proto %u has malformed debug line info",
-                                    (unsigned int)proto_index);
+        if (sizedbg) {
+          uint32_t firstline = 0, numline = 0;
+          if (!tolua_read_uleb128(buf, len, &p, &firstline) ||
+              !tolua_read_uleb128(buf, len, &p, &numline)) {
+            return tolua_failbytecode(TOLUA_BCCONV_ERR_MALFORMED_CHUNK,
+                                      "proto %u has malformed debug line info",
+                                      (unsigned int)proto_index);
+          }
+          ctx.proto_firstline = firstline;
         }
-      }
       if (p > proto_end) {
         return tolua_failbytecode(TOLUA_BCCONV_ERR_MALFORMED_CHUNK,
                                   "proto %u debug header exceeds proto bounds",
@@ -9859,6 +10031,26 @@ LUALIB_API char* tolua_convertbytecodeex(const char *buff, int sz, int target_fr
   uint8_t *patched = NULL;
   size_t patched_size = 0;
   int status = TOLUA_BCCONV_OK;
+  unsigned long long src_hash = 0ULL;
+  unsigned long long out_hash = 0ULL;
+
+  tolua_conv_stat_proto_total = 0;
+  tolua_conv_stat_insert_copy_retry = 0;
+  tolua_conv_stat_last_firstline = 0;
+  ulua_repack_log_budget = 3000;
+#if defined(__ANDROID__)
+  static int ulua_conv_enter_budget = 16;
+  if (ulua_conv_enter_budget > 0) {
+    __android_log_print(ANDROID_LOG_INFO, "ulua-bytecode",
+      "conv_enter_v2 sz=%d target_fr2=%d head=%02x %02x %02x %02x",
+      sz, target_fr2,
+      (unsigned int)(sz > 0 ? (uint8_t)buff[0] : 0),
+      (unsigned int)(sz > 1 ? (uint8_t)buff[1] : 0),
+      (unsigned int)(sz > 2 ? (uint8_t)buff[2] : 0),
+      (unsigned int)(sz > 3 ? (uint8_t)buff[3] : 0));
+    ulua_conv_enter_budget--;
+  }
+#endif
 
   tolua_clearbytecodedebug();
   if (out_sz != NULL) *out_sz = 0;
@@ -9870,6 +10062,7 @@ LUALIB_API char* tolua_convertbytecodeex(const char *buff, int sz, int target_fr
     return NULL;
   }
   if (target_fr2 != 0) target_fr2 = 1;
+  src_hash = tolua_fnv1a64((const uint8_t *)buff, (size_t)sz);
 
   patched = (uint8_t *)malloc((size_t)sz);
   if (patched == NULL) {
@@ -9891,6 +10084,23 @@ LUALIB_API char* tolua_convertbytecodeex(const char *buff, int sz, int target_fr
     free(patched);
     return NULL;
   }
+  out_hash = tolua_fnv1a64((const uint8_t *)patched, patched_size);
+
+#if defined(__ANDROID__)
+  __android_log_print(ANDROID_LOG_INFO, "ulua-bytecode",
+    "conv_exit_v2 out=%d head=%02x %02x %02x %02x flag0=%02x protos=%u rebuilds=%u lastline=%u src_hash=%016llx out_hash=%016llx",
+    (int)patched_size,
+    (unsigned int)(patched_size > 0 ? patched[0] : 0),
+    (unsigned int)(patched_size > 1 ? patched[1] : 0),
+    (unsigned int)(patched_size > 2 ? patched[2] : 0),
+    (unsigned int)(patched_size > 3 ? patched[3] : 0),
+    (unsigned int)(patched_size > 4 ? patched[4] : 0),
+    tolua_conv_stat_proto_total,
+    tolua_conv_stat_insert_copy_retry,
+    tolua_conv_stat_last_firstline,
+    src_hash,
+    out_hash);
+#endif
 
   tolua_clearbytecodedebug();
   if (out_sz != NULL) *out_sz = (int)patched_size;
