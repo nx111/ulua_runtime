@@ -309,6 +309,31 @@ int tolua_index(lua_State* L)
     else
     {
       lua_pop(L, 1);
+      /* Compatibility fallback: some bindings keep getter entries in a
+         tag-keyed subtable on the metatable instead of direct key slots. */
+      lua_pushlightuserdata(L, &tag);
+      lua_rawget(L, -2);
+      if (lua_istable(L, -1))
+      {
+        lua_pushvalue(L, 2);
+        lua_rawget(L, -2);
+        type = lua_type(L, -1);
+        if (type == LUA_TFUNCTION)
+        {
+          lua_pushvalue(L, 1);
+          lua_call(L, 1, -1);
+          return 1;
+        }
+        else if (type == LUA_TTABLE)
+        {
+          lua_rawgeti(L, -1, 1);
+          lua_pushvalue(L, 1);
+          lua_call(L, 1, -1);
+          return 1;
+        }
+        lua_pop(L, 1);
+      }
+      lua_pop(L, 1);
       ret = lua_getmetatable(L, -1);                
     }
   }
@@ -350,6 +375,32 @@ int tolua_newIndex(lua_State* L)
     }
     else
     {
+      lua_pop(L, 1);
+      /* Compatibility fallback: tag-keyed setter table/function on metatable. */
+      lua_pushlightuserdata(L, &tag);
+      lua_rawget(L, -2);
+      if (lua_istable(L, -1))
+      {
+        lua_pushvalue(L, 2);
+        lua_rawget(L, -2);
+        if (lua_isfunction(L, -1))
+        {
+          lua_pushvalue(L, 1);
+          lua_pushvalue(L, 3);
+          lua_call(L, 2, 0);
+          return 0;
+        }
+        else if (lua_istable(L, -1))
+        {
+          lua_rawgeti(L, -1, 2);
+          lua_pushvalue(L, 1);
+          lua_pushvalue(L, 2);
+          lua_pushvalue(L, 3);
+          lua_call(L, 3, 0);
+          return 0;
+        }
+        lua_pop(L, 1);
+      }
       lua_pop(L, 1);
       ret = lua_getmetatable(L, -1);    
     }  
@@ -544,6 +595,8 @@ static char tolua_last_bytecode_debug[1024];
 static unsigned int tolua_conv_stat_proto_total = 0;
 static unsigned int tolua_conv_stat_insert_copy_retry = 0;
 static unsigned int tolua_conv_stat_last_firstline = 0;
+/* Keep bytecode conversion logs off by default. Enable only for focused debugging. */
+static int ulua_enable_bytecode_log = 0;
 static int ulua_repack_log_budget = 0;
 static int ulua_focus_firstline = 2616;
 static int ulua_focus_repack_only = 1;
@@ -764,7 +817,7 @@ static int tolua_chunk_name_contains(const char *name, size_t len, const char *n
 static int tolua_should_trace_repack(const tolua_bcdebug_ctx *ctx)
 {
   (void)ctx;
-  return 1;
+  return ulua_enable_bytecode_log;
 }
 
 static int ulua_should_emit_repack_log(const tolua_bcdebug_ctx *ctx, uint32_t pc, const char *detail)
@@ -2025,21 +2078,7 @@ static int tolua_shift_proto_slice_right_for_fr2(uint8_t *buf, size_t bc_pos, ui
   if (old_first > old_last) return TOLUA_BCCONV_OK;
   consumer_ins = (BCIns)tolua_read_ins(buf + bc_pos + (size_t)pc * 4, be);
   consumer_op = bc_op(consumer_ins);
-#if defined(__ANDROID__)
-  if (ctx != NULL && ctx->proto_firstline == 2616 && consumer_op == BC_CALL && pc <= 48) {
-    BCIns prev1 = (pc >= 1) ? (BCIns)tolua_read_ins(buf + bc_pos + (size_t)(pc - 1) * 4, be) : 0;
-    BCIns prev2 = (pc >= 2) ? (BCIns)tolua_read_ins(buf + bc_pos + (size_t)(pc - 2) * 4, be) : 0;
-    __android_log_print(ANDROID_LOG_INFO, "ulua-bytecode",
-      "focus2616 enter pc=%u a=%u b=%u c=%u old=[%u,%u] p1=%s(%u,%u,%u) p2=%s(%u,%u,%u)",
-      (unsigned int)pc,
-      (unsigned int)bc_a(consumer_ins),
-      (unsigned int)bc_b(consumer_ins),
-      (unsigned int)bc_c(consumer_ins),
-      (unsigned int)old_first, (unsigned int)old_last,
-      tolua_bc_opname(bc_op(prev1)), (unsigned int)bc_a(prev1), (unsigned int)bc_b(prev1), (unsigned int)bc_c(prev1),
-      tolua_bc_opname(bc_op(prev2)), (unsigned int)bc_a(prev2), (unsigned int)bc_b(prev2), (unsigned int)bc_c(prev2));
-  }
-#endif
+
   if (old_first == old_last && pc > 0) {
     BCIns prev = (BCIns)tolua_read_ins(buf + bc_pos + (size_t)(pc - 1) * 4, be);
     BCOp prev_op = bc_op(prev);
@@ -2123,41 +2162,6 @@ static int tolua_shift_proto_slice_right_for_fr2(uint8_t *buf, size_t bc_pos, ui
       return TOLUA_BCCONV_OK;
     }
   }
-  if (consumer_op == BC_CALL && bc_c(consumer_ins) == 3 &&
-      old_last == (BCReg)(old_first + 1) && pc >= 3) {
-    BCIns prev1 = (BCIns)tolua_read_ins(buf + bc_pos + (size_t)(pc - 1) * 4, be);
-    BCIns prev2 = (BCIns)tolua_read_ins(buf + bc_pos + (size_t)(pc - 2) * 4, be);
-    BCIns prev3 = (BCIns)tolua_read_ins(buf + bc_pos + (size_t)(pc - 3) * 4, be);
-    BCOp prev1_op = bc_op(prev1);
-    BCOp prev2_op = bc_op(prev2);
-    BCReg base = bc_a(consumer_ins);
-    BCReg src_reg = bc_d(prev3);
-    int prev1_is_const =
-      prev1_op == BC_KSTR || prev1_op == BC_KSHORT ||
-      prev1_op == BC_KNUM || prev1_op == BC_KPRI ||
-      prev1_op == BC_KCDATA;
-
-    /* Dot-call shape with explicit self and constant arg:
-       MOV self<-obj; TGET* func<-obj; K* arg2; CALL(C=3).
-       existing-slice fast-path can falsely reuse stale regs here on FR2. */
-    if (bc_op(prev3) == BC_MOV &&
-        bc_a(prev3) == old_first &&
-        (prev2_op == BC_TGETS || prev2_op == BC_TGETV || prev2_op == BC_TGETB) &&
-        bc_a(prev2) == base &&
-        bc_b(prev2) == src_reg &&
-        prev1_is_const &&
-        bc_a(prev1) == old_last &&
-        ctx != NULL &&
-        (int)ctx->proto_firstline == ulua_focus_firstline &&
-        pc <= 24) {
-      allow_existing_slice = 0;
-      force_copy_fallback = 1;
-      TOLUA_REPACK_LOG(ctx, pc,
-                       "force copy-fallback for method-const CALL(C=3) base=%u src=%u old=[%u,%u]",
-                       (unsigned int)base, (unsigned int)src_reg,
-                       (unsigned int)old_first, (unsigned int)old_last);
-    }
-  }
   if (consumer_op == BC_CALL && bc_c(consumer_ins) == 2 &&
       old_first == old_last && pc >= 2) {
     BCIns prev1 = (BCIns)tolua_read_ins(buf + bc_pos + (size_t)(pc - 1) * 4, be);
@@ -2192,23 +2196,11 @@ static int tolua_shift_proto_slice_right_for_fr2(uint8_t *buf, size_t bc_pos, ui
          prev2_op == BC_UGET || prev2_op == BC_GGET) &&
         bc_a(prev2) == base &&
         ((prev2_op != BC_TGETS && prev2_op != BC_TGETV && prev2_op != BC_TGETB) ||
-         (bc_b(prev2) == base && bc_d(prev1) == bc_b(prev2)))) {
+         bc_b(prev2) == base)) {
       TOLUA_REPACK_LOG(ctx, pc,
                        "skip FR2 arg shift for mirrored direct CALL(C=2) old=%u base=%u src=%u",
                        (unsigned int)old_first, (unsigned int)base, (unsigned int)bc_d(prev1));
       return TOLUA_BCCONV_OK;
-    }
-    if (tolua_reg_is_passthrough_seed_before_pc(buf, bc_pos, be, pc, bc_d(prev1)) &&
-        prev1_op == BC_MOV &&
-        bc_a(prev1) == old_first &&
-        (prev2_op == BC_TGETS || prev2_op == BC_TGETV || prev2_op == BC_TGETB) &&
-        bc_a(prev2) == base &&
-        bc_b(prev2) == base &&
-        bc_d(prev1) != bc_b(prev2)) {
-      TOLUA_REPACK_LOG(ctx, pc,
-                       "no skip mirrored CALL(C=2): src mismatch old=%u base=%u src=%u tbl=%u",
-                       (unsigned int)old_first, (unsigned int)base, (unsigned int)bc_d(prev1),
-                       (unsigned int)bc_b(prev2));
     }
 
     /* Keep table-parent keyed TDUP one-arg calls as-is:
@@ -3089,12 +3081,18 @@ static int tolua_existing_fr2_call_args_are_aligned(const uint8_t *buf, size_t b
         old_next_writer_op != BC_VARG &&
         old_next_writer_op != BC_ITERC &&
         old_next_writer_op != BC_ITERN) {
+      /* MOV->KSTR chains are common in battle.lua and this reject can over-block
+         otherwise valid FR2 slice reuse (old-second and new-first are the same KSTR).
+         Let later safety checks handle true hazards. */
+      if (!(old_writer_op == BC_MOV && new_writer_op == BC_KSTR &&
+            old_next_writer_op == BC_KSTR && old_next_writer_pc == new_writer_pc)) {
       TOLUA_REPACK_LOG(ctx, pc,
                        "reject existing FR2 slice: new-first writer matches old-second old=%u(pc=%u,%s) old2=%u(pc=%u,%s) new=%u(pc=%u,%s)",
                        (unsigned int)old_reg, (unsigned int)old_writer_pc, tolua_bc_opname(old_writer_op),
                        (unsigned int)(old_reg + 1), (unsigned int)old_next_writer_pc, tolua_bc_opname(old_next_writer_op),
                        (unsigned int)new_reg, (unsigned int)new_writer_pc, tolua_bc_opname(new_writer_op));
       return 0;
+      }
     }
     if (have_old_next &&
         old_last >= (BCReg)(old_first + 2) &&
@@ -10037,10 +10035,10 @@ LUALIB_API char* tolua_convertbytecodeex(const char *buff, int sz, int target_fr
   tolua_conv_stat_proto_total = 0;
   tolua_conv_stat_insert_copy_retry = 0;
   tolua_conv_stat_last_firstline = 0;
-  ulua_repack_log_budget = 3000;
+  ulua_repack_log_budget = ulua_enable_bytecode_log ? 3000 : 0;
 #if defined(__ANDROID__)
   static int ulua_conv_enter_budget = 16;
-  if (ulua_conv_enter_budget > 0) {
+  if (ulua_enable_bytecode_log && ulua_conv_enter_budget > 0) {
     __android_log_print(ANDROID_LOG_INFO, "ulua-bytecode",
       "conv_enter_v2 sz=%d target_fr2=%d head=%02x %02x %02x %02x",
       sz, target_fr2,
@@ -10087,19 +10085,21 @@ LUALIB_API char* tolua_convertbytecodeex(const char *buff, int sz, int target_fr
   out_hash = tolua_fnv1a64((const uint8_t *)patched, patched_size);
 
 #if defined(__ANDROID__)
-  __android_log_print(ANDROID_LOG_INFO, "ulua-bytecode",
-    "conv_exit_v2 out=%d head=%02x %02x %02x %02x flag0=%02x protos=%u rebuilds=%u lastline=%u src_hash=%016llx out_hash=%016llx",
-    (int)patched_size,
-    (unsigned int)(patched_size > 0 ? patched[0] : 0),
-    (unsigned int)(patched_size > 1 ? patched[1] : 0),
-    (unsigned int)(patched_size > 2 ? patched[2] : 0),
-    (unsigned int)(patched_size > 3 ? patched[3] : 0),
-    (unsigned int)(patched_size > 4 ? patched[4] : 0),
-    tolua_conv_stat_proto_total,
-    tolua_conv_stat_insert_copy_retry,
-    tolua_conv_stat_last_firstline,
-    src_hash,
-    out_hash);
+  if (ulua_enable_bytecode_log) {
+    __android_log_print(ANDROID_LOG_INFO, "ulua-bytecode",
+      "conv_exit_v2 out=%d head=%02x %02x %02x %02x flag0=%02x protos=%u rebuilds=%u lastline=%u src_hash=%016llx out_hash=%016llx",
+      (int)patched_size,
+      (unsigned int)(patched_size > 0 ? patched[0] : 0),
+      (unsigned int)(patched_size > 1 ? patched[1] : 0),
+      (unsigned int)(patched_size > 2 ? patched[2] : 0),
+      (unsigned int)(patched_size > 3 ? patched[3] : 0),
+      (unsigned int)(patched_size > 4 ? patched[4] : 0),
+      tolua_conv_stat_proto_total,
+      tolua_conv_stat_insert_copy_retry,
+      tolua_conv_stat_last_firstline,
+      src_hash,
+      out_hash);
+  }
 #endif
 
   tolua_clearbytecodedebug();
@@ -10125,4 +10125,5 @@ LUALIB_API char* tolua_convertbytecodeex(const char *buff, int sz, int target_fr
   return NULL;
 }
 #endif
+
 
