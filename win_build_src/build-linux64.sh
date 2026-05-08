@@ -10,6 +10,41 @@
 set -euo pipefail
 
 API_COMPAT_DEF="-Dlua_tolstring=lua_tolstring_internal -Dlua_pcall=lua_pcall_internal"
+LUAJIT_XCFLAGS="$API_COMPAT_DEF"
+ULUA_CFLAGS="$API_COMPAT_DEF"
+
+usage() {
+  cat <<'EOF'
+Usage: build-linux64.sh [-fr2]
+
+Options:
+  -fr2    Enable LuaJIT GC64 build flags.
+EOF
+}
+
+ENABLE_FR2=0
+for arg in "$@"; do
+  case "$arg" in
+    -fr2)
+      ENABLE_FR2=1
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "ERROR: unknown argument: $arg" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+if [ "$ENABLE_FR2" -eq 1 ]; then
+  LUAJIT_XCFLAGS="$LUAJIT_XCFLAGS -DLUAJIT_ENABLE_GC64"
+  ULUA_CFLAGS="$ULUA_CFLAGS -DLUAJIT_ENABLE_GC64"
+  echo "[INFO] LuaJIT GC64: enabled (-fr2)"
+fi
 
 # 64 Bit Version
 mkdir -p linux/x86_64
@@ -18,7 +53,7 @@ mkdir -p Plugins/x86_64
 cd luajit
 make clean
 
-make BUILDMODE=static CC="gcc -fPIC -m64" XCFLAGS="$API_COMPAT_DEF"
+make BUILDMODE=static CC="gcc -fPIC -m64" XCFLAGS="$LUAJIT_XCFLAGS"
 cp src/libluajit.a ../linux/x86_64/libluajit.a
 
 cd ../pbc/
@@ -45,7 +80,7 @@ gcc -fPIC \
 	-Iluajit/src \
 	-Ipbc \
 	-Icjson \
-	$API_COMPAT_DEF \
+	$ULUA_CFLAGS \
 	-Wl,--whole-archive \
 	linux/x86_64/libluajit.a \
 	linux/x86_64/libpbc.a \
