@@ -8,24 +8,47 @@ if errorlevel 1 (
   exit /b 1
 )
 
-set "TARGET=%~1"
-if "%TARGET%"=="" set "TARGET=x64"
+set "TARGET="
+set "ENABLE_FR2="
 
-if /I not "%TARGET%"=="x64" if /I not "%TARGET%"=="x86" (
-  echo Usage: %~nx0 [x64^|x86]
-  echo Example: %~nx0 x64
-  goto :error
+:parse_args
+if "%~1"=="" goto :args_done
+if /I "%~1"=="x64" (
+  set "TARGET=x64"
+  shift
+  goto :parse_args
 )
+if /I "%~1"=="x86" (
+  set "TARGET=x86"
+  shift
+  goto :parse_args
+)
+if /I "%~1"=="-fr2" (
+  set "ENABLE_FR2=1"
+  shift
+  goto :parse_args
+)
+if /I "%~1"=="-h" goto :usage_ok
+if /I "%~1"=="--help" goto :usage_ok
+echo [ERROR] Unknown argument: %~1
+goto :usage_error
+
+:args_done
+if not defined TARGET set "TARGET=x64"
 
 if /I "%TARGET%"=="x64" (
   set "OUT_SUBDIR=x86_64"
   set "MACHINE=X64"
-  ::if not defined WIN64_LUAJIT_DEFS set "WIN64_LUAJIT_DEFS=/DLUAJIT_ENABLE_GC64"
   set "TARGET_LUAJIT_DEFS=%WIN64_LUAJIT_DEFS%"
+  if defined ENABLE_FR2 set "TARGET_LUAJIT_DEFS=%TARGET_LUAJIT_DEFS% /DLUAJIT_ENABLE_GC64"
 ) else (
   set "OUT_SUBDIR=x86"
   set "MACHINE=X86"
   set "TARGET_LUAJIT_DEFS="
+  if defined ENABLE_FR2 (
+    echo [ERROR] -fr2 is only supported for x64.
+    goto :error
+  )
 )
 
 call :ensure_msvc_env "%TARGET%"
@@ -56,18 +79,18 @@ echo [1/4] Building LuaJIT static library...
 pushd "%LUAJIT_DIR%\src" >nul
 set "OLD_CL=%CL%"
 set "CL=%API_COMPAT_DEF% %TARGET_LUAJIT_DEFS% %CL%"
+if exist "lua51.lib" del /q "lua51.lib" >nul 2>nul
 call msvcbuild.bat static
-if errorlevel 1 (
-  set "CL=%OLD_CL%"
-  popd >nul
-  goto :error
-)
+set "LUAJIT_RC=%ERRORLEVEL%"
 set "CL=%OLD_CL%"
 popd >nul
 
 if not exist "%LUAJIT_LIB%" (
   echo [ERROR] Missing LuaJIT static library: %LUAJIT_LIB%
   goto :error
+)
+if not "%LUAJIT_RC%"=="0" (
+  echo [WARN] LuaJIT static library was built, but luajit.exe link failed. Continuing with %LUAJIT_LIB%.
 )
 
 echo [2/4] Building pbc static library...
@@ -107,6 +130,17 @@ if errorlevel 1 goto :error
 echo [OK] Built %OUT_DLL%
 popd >nul
 exit /b 0
+
+:usage_ok
+echo Usage: %~nx0 [x64^|x86] [-fr2]
+echo Example: %~nx0 x64 -fr2
+popd >nul
+exit /b 0
+
+:usage_error
+echo Usage: %~nx0 [x64^|x86] [-fr2]
+echo Example: %~nx0 x64 -fr2
+goto :error
 
 :ensure_msvc_env
 set "REQ_TARGET=%~1"

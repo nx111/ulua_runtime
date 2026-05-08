@@ -7,7 +7,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ANDROID_DIR="$ROOT_DIR/android"
 JNI_DIR="$ANDROID_DIR/jni"
-LUAJIT_SRC_DIR="$JNI_DIR/luajit/src"
+LUAJIT_SRC_DIR="$ROOT_DIR/luajit/src"
 ABI="arm64-v8a"
 API_LEVEL="${ANDROID_API_LEVEL:-21}"
 API_COMPAT_DEF="-Dlua_tolstring=lua_tolstring_internal -Dlua_pcall=lua_pcall_internal -DluaL_reg=luaL_Reg"
@@ -15,10 +15,12 @@ PAGE_ALIGN_LDFLAGS="-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
 
 NDK_ROOT="${ANDROID_NDK_ROOT:-${ANDROID_NDK_HOME:-${NDK:-}}}"
 if [ -z "${NDK_ROOT}" ]; then
-  if [ -d "D:/Mobile/sdk/ndk/android-ndk-r10e" ]; then
-    NDK_ROOT="D:/Mobile/sdk/ndk/android-ndk-r10e"
-  elif [ -d "D:/adt-bundle-windows/ndk-r8d" ]; then
-    NDK_ROOT="D:/adt-bundle-windows/ndk-r8d"
+  if [ -d "/mnt/d/Mobile/sdk/linux/ndk/android-ndk-r21e" ]; then
+    NDK_ROOT="/mnt/d/Mobile/sdk/linux/ndk/android-ndk-r21e"
+  elif [ -d "/mnt/d/Mobile/sdk/win/ndk/android-ndk-r21e" ]; then
+    NDK_ROOT="/mnt/d/Mobile/sdk/win/ndk/android-ndk-r21e"
+  elif [ -d "D:/Mobile/sdk/win/ndk/android-ndk-r21e" ]; then
+    NDK_ROOT="D:/Mobile/sdk/win/ndk/android-ndk-r21e"
   else
     echo "ERROR: NDK path not found. Set ANDROID_NDK_ROOT (or ANDROID_NDK_HOME/NDK)." >&2
     exit 1
@@ -30,6 +32,9 @@ NDK_ROOT="${NDK_ROOT%\'}"
 NDK_ROOT="${NDK_ROOT#\'}"
 if [[ "$NDK_ROOT" == [A-Za-z]:\\* ]]; then
   NDK_ROOT="${NDK_ROOT//\\//}"
+fi
+if [[ "$NDK_ROOT" =~ ^([A-Za-z]):/(.*)$ ]]; then
+  NDK_ROOT="/mnt/${BASH_REMATCH[1],,}/${BASH_REMATCH[2]}"
 fi
 
 MAKE_CMD="${MAKE:-}"
@@ -47,12 +52,12 @@ if [ -z "$MAKE_CMD" ]; then
 fi
 
 NDK_BUILD=""
-if [ -f "$NDK_ROOT/ndk-build.cmd" ] && (command -v cmd.exe >/dev/null 2>&1 || command -v cmd >/dev/null 2>&1); then
-  NDK_BUILD="$NDK_ROOT/ndk-build.cmd"
-elif [ -x "$NDK_ROOT/ndk-build" ]; then
+if [ -x "$NDK_ROOT/ndk-build" ]; then
   NDK_BUILD="$NDK_ROOT/ndk-build"
 elif [ -f "$NDK_ROOT/ndk-build" ]; then
   NDK_BUILD="$NDK_ROOT/ndk-build"
+elif [ -f "$NDK_ROOT/ndk-build.cmd" ] && (command -v cmd.exe >/dev/null 2>&1 || command -v cmd >/dev/null 2>&1); then
+  NDK_BUILD="$NDK_ROOT/ndk-build.cmd"
 elif [ -f "$NDK_ROOT/ndk-build.cmd" ]; then
   NDK_BUILD="$NDK_ROOT/ndk-build.cmd"
 elif command -v ndk-build >/dev/null 2>&1; then
@@ -122,8 +127,8 @@ path_exists_cross_env() {
 
 if ! grep -R -E -n "LJ_TARGET_ARM64|arm64|aarch64|vm_arm64\\.dasc" "$LUAJIT_SRC_DIR" >/dev/null 2>&1; then
   echo "ERROR: Current LuaJIT source does not include ARM64 support." >&2
-  echo "Root cause: this repo is LuaJIT 2.0.4, which cannot build arm64-v8a." >&2
-  echo "Please upgrade jni/luajit to LuaJIT 2.1 branch (or another arm64-capable fork), then rerun." >&2
+  echo "Root cause: win_build_src/luajit is not the expected LuaJIT 2.1.0-beta3 source tree." >&2
+  echo "Please restore win_build_src/luajit to an arm64-capable LuaJIT 2.1 branch, then rerun." >&2
   exit 1
 fi
 
@@ -185,6 +190,7 @@ else
   HOST_CC_CMD="gcc -ffast-math -O3"
 fi
 pushd "$LUAJIT_SRC_DIR" >/dev/null
+"$MAKE_CMD" clean
 MAKE_VARS=(
   "HOST_CC=$HOST_CC_CMD"
   "CC=$TARGET_CC"
@@ -197,7 +203,7 @@ MAKE_VARS=(
 )
 echo "LuaJIT TARGET_CC: $TARGET_CC"
 "$MAKE_CMD" "${MAKE_VARS[@]}" libluajit.a
-cp -f libluajit.a ../../libluajit.a
+cp -f libluajit.a "$JNI_DIR/libluajit.a"
 popd >/dev/null
 
 pushd "$ANDROID_DIR" >/dev/null

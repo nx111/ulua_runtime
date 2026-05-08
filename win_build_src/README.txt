@@ -7,7 +7,7 @@ LuaJIT
 - uLua in this repository is integrated against LuaJIT 2.1.0-beta3.
 - Upstream LuaJIT can be obtained from: http://luajit.org/
 - Win32/Win64 now share the same `luajit` source tree.
-- `build-win64.sh` / `build-win64-wsl.sh` / `build-win-msvc.bat x64` enable `LUAJIT_ENABLE_GC64` by default.
+- `build-win64.sh -fr2` / `build-win64-wsl.sh -fr2` / `build-win-msvc.bat x64 -fr2` enable `LUAJIT_ENABLE_GC64`.
 
 Build Overview
 - Place LuaJIT source in `<source root>/luajit` (or the path expected by scripts).
@@ -30,7 +30,7 @@ From PowerShell:
 2. `$env:ANDROID_NDK_ROOT='D:/mobile/sdk/win/ndk/android-ndk-r10e'`
 3. `$env:MAKE='make'`
 4. `Remove-Item Env:CFLAGS,Env:CPPFLAGS,Env:LDFLAGS,Env:MAKEFLAGS,Env:TARGET_FLAGS -ErrorAction SilentlyContinue`
-5. `& 'C:\Program Files\Git\bin\bash.exe' win_build_src/android/jni/build_arm.sh`
+5. `& 'C:\Program Files\Git\bin\bash.exe' win_build_src/build-android-arm.sh`
 
 Expected output contains:
 - `LuaJIT SYSROOT: ...`
@@ -42,7 +42,7 @@ From PowerShell:
 1. `cd D:\Games\work\ulua_runtime`
 2. `$env:ANDROID_NDK_ROOT='D:/mobile/sdk/win/ndk/android-ndk-r10e'`
 3. `$env:MAKE='make'`
-4. `& 'C:\Program Files\Git\bin\bash.exe' win_build_src/android/jni/build_x86.sh`
+4. `& 'C:\Program Files\Git\bin\bash.exe' win_build_src/build-android-x86.sh`
 
 Common Error and Fix
 Error:
@@ -57,7 +57,6 @@ Fix:
 - Avoid running legacy/backup script copies.
 
 Tracked Build Scripts
-- `win_build_src/android/jni/build_arm.sh`
-- `win_build_src/android/jni/build_x86.sh`
 - `win_build_src/build-android-arm.sh`
+- `win_build_src/build-android-arm64.sh`
 - `win_build_src/build-android-x86.sh`

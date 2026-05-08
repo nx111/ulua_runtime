@@ -7,16 +7,20 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ANDROID_DIR="$ROOT_DIR/android"
 JNI_DIR="$ANDROID_DIR/jni"
-LUAJIT_SRC_DIR="$JNI_DIR/luajit/src"
+LUAJIT_SRC_DIR="$ROOT_DIR/luajit/src"
 ABI="x86"
 API_COMPAT_DEF="-Dlua_tolstring=lua_tolstring_internal -Dlua_pcall=lua_pcall_internal -DluaL_reg=luaL_Reg"
 
 NDK_ROOT="${ANDROID_NDK_ROOT:-${ANDROID_NDK_HOME:-${NDK:-}}}"
 if [ -z "${NDK_ROOT}" ]; then
-  if [ -d "D:/Mobile/sdk/ndk/android-ndk-r10e" ]; then
-    NDK_ROOT="D:/Mobile/sdk/ndk/android-ndk-r10e"
+  if [ -d "/mnt/d/Mobile/sdk/win/ndk/android-ndk-r10e" ]; then
+    NDK_ROOT="/mnt/d/Mobile/sdk/win/ndk/android-ndk-r10e"
+  elif [ -d "D:/Mobile/sdk/win/ndk/android-ndk-r10e" ]; then
+    NDK_ROOT="D:/Mobile/sdk/win/ndk/android-ndk-r10e"
   elif [ -d "D:/adt-bundle-windows/ndk-r8d" ]; then
     NDK_ROOT="D:/adt-bundle-windows/ndk-r8d"
+  elif [ -d "/mnt/d/adt-bundle-windows/ndk-r8d" ]; then
+    NDK_ROOT="/mnt/d/adt-bundle-windows/ndk-r8d"
   else
     echo "ERROR: NDK path not found. Set ANDROID_NDK_ROOT (or ANDROID_NDK_HOME/NDK)." >&2
     exit 1
@@ -29,14 +33,17 @@ NDK_ROOT="${NDK_ROOT#\'}"
 if [[ "$NDK_ROOT" == [A-Za-z]:\\* ]]; then
   NDK_ROOT="${NDK_ROOT//\\//}"
 fi
+if [[ "$NDK_ROOT" =~ ^([A-Za-z]):/(.*)$ ]]; then
+  NDK_ROOT="/mnt/${BASH_REMATCH[1],,}/${BASH_REMATCH[2]}"
+fi
 
 NDK_BUILD=""
-if [ -f "$NDK_ROOT/ndk-build.cmd" ] && (command -v cmd.exe >/dev/null 2>&1 || command -v cmd >/dev/null 2>&1); then
-  NDK_BUILD="$NDK_ROOT/ndk-build.cmd"
-elif [ -x "$NDK_ROOT/ndk-build" ]; then
+if [ -x "$NDK_ROOT/ndk-build" ]; then
   NDK_BUILD="$NDK_ROOT/ndk-build"
 elif [ -f "$NDK_ROOT/ndk-build" ]; then
   NDK_BUILD="$NDK_ROOT/ndk-build"
+elif [ -f "$NDK_ROOT/ndk-build.cmd" ] && (command -v cmd.exe >/dev/null 2>&1 || command -v cmd >/dev/null 2>&1); then
+  NDK_BUILD="$NDK_ROOT/ndk-build.cmd"
 elif [ -f "$NDK_ROOT/ndk-build.cmd" ]; then
   NDK_BUILD="$NDK_ROOT/ndk-build.cmd"
 elif command -v ndk-build >/dev/null 2>&1; then
@@ -59,7 +66,9 @@ run_ndk_build() {
     fi
 
     local ndk_cmd_path="$NDK_BUILD"
-    if [[ "$ndk_cmd_path" =~ ^/([a-zA-Z])/(.*)$ ]]; then
+    if [[ "$ndk_cmd_path" =~ ^/mnt/([a-zA-Z])/(.*)$ ]]; then
+      ndk_cmd_path="${BASH_REMATCH[1]}:/${BASH_REMATCH[2]}"
+    elif [[ "$ndk_cmd_path" =~ ^/([a-zA-Z])/(.*)$ ]]; then
       ndk_cmd_path="${BASH_REMATCH[1]}:/${BASH_REMATCH[2]}"
     fi
     ndk_cmd_path="${ndk_cmd_path//\//\\}"
@@ -124,7 +133,7 @@ MAKE_VARS=(
 )
 echo "LuaJIT SYSROOT: $SYSROOT"
 "$MAKE_CMD" "${MAKE_VARS[@]}"
-cp -f libluajit.a ../../libluajit.a
+cp -f libluajit.a "$JNI_DIR/libluajit.a"
 popd >/dev/null
 
 pushd "$ANDROID_DIR" >/dev/null
