@@ -24,15 +24,23 @@ extern "C" {
 
 #if LUA_VERSION_NUM == 501
 
+#ifndef lua_rawlen
 #define lua_rawlen lua_objlen
+#endif
+
+#ifndef luaL_newlib
 #define luaL_newlib(L ,reg) luaL_register(L,"protobuf.c",reg)
+#endif
+
 #define luaL_buffinit(L , _ ) 
 #define luaL_prepbuffsize( b , cap ) malloc(cap)
 #define _Free(p) free(p)
 #undef luaL_addsize
 #define luaL_addsize(b , len) lua_pushlstring(L, temp , len) ; free(temp)
 #define luaL_pushresult(b) 
+#ifndef luaL_checkversion
 #define luaL_checkversion(L)
+#endif
 
 #else
 

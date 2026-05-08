@@ -8,14 +8,17 @@
 # Written by Christopher Redden, December 2013
 
 API_COMPAT_DEF="-Dlua_tolstring=lua_tolstring_internal -Dlua_pcall=lua_pcall_internal"
+#WIN64_LUAJIT_XCFLAGS="${WIN64_LUAJIT_XCFLAGS:--DLUAJIT_ENABLE_GC64}"
+WIN64_LUAJIT_MAKE_XCFLAGS="$API_COMPAT_DEF $WIN64_LUAJIT_XCFLAGS"
+WIN64_PLUGIN_CFLAGS="$API_COMPAT_DEF $WIN64_LUAJIT_XCFLAGS"
 
-# 62 Bit Version
+# 64 Bit Version
 mkdir -p window/x86_64
 
 cd luajit
 mingw32-make clean
 
-mingw32-make BUILDMODE=static CC="gcc -m64" XCFLAGS="$API_COMPAT_DEF"
+mingw32-make BUILDMODE=static CC="gcc -m64" XCFLAGS="$WIN64_LUAJIT_MAKE_XCFLAGS"
 cp src/libluajit.a ../window/x86_64/libluajit.a
 
 cd ../pbc/
@@ -55,7 +58,7 @@ gcc lua_wrap.c \
 	-Ipbc \
 	-Icjson \
 	-Iluasocket/src \
-	$API_COMPAT_DEF \
+	$WIN64_PLUGIN_CFLAGS \
 	-Wl,--whole-archive \
 	window/x86_64/libluajit.a \
 	window/x86_64/libpbc.a \

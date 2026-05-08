@@ -4,8 +4,10 @@ The uLua source code and build scripts are proprietary and confidential.
 Unauthorized copying, via any medium, is strictly prohibited.
 
 LuaJIT
-- uLua in this repository is integrated against LuaJIT 2.0.x.
+- uLua in this repository is integrated against LuaJIT 2.1.0-beta3.
 - Upstream LuaJIT can be obtained from: http://luajit.org/
+- Win32/Win64 now share the same `luajit` source tree.
+- `build-win64.sh` / `build-win64-wsl.sh` / `build-win-msvc.bat x64` enable `LUAJIT_ENABLE_GC64` by default.
 
 Build Overview
 - Place LuaJIT source in `<source root>/luajit` (or the path expected by scripts).

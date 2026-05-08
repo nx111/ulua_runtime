@@ -4,13 +4,15 @@
 set -euo pipefail
 
 API_COMPAT_DEF="-Dlua_tolstring=lua_tolstring_internal -Dlua_pcall=lua_pcall_internal"
+WIN64_LUAJIT_MAKE_XCFLAGS="$API_COMPAT_DEF"
+WIN64_PLUGIN_CFLAGS="$API_COMPAT_DEF"
 
 mkdir -p window/x86_64
 mkdir -p Plugins/x86_64
 
 cd luajit
 make clean
-make HOST_CC="gcc" CROSS=x86_64-w64-mingw32- TARGET_SYS=Windows BUILDMODE=static XCFLAGS="$API_COMPAT_DEF"
+make HOST_CC="gcc" CROSS=x86_64-w64-mingw32- TARGET_SYS=Windows BUILDMODE=static XCFLAGS="$WIN64_LUAJIT_MAKE_XCFLAGS"
 cp src/libluajit.a ../window/x86_64/libluajit.a
 
 cd ../pbc/
@@ -50,7 +52,7 @@ x86_64-w64-mingw32-gcc lua_wrap.c \
 	-Ipbc \
 	-Icjson \
 	-Iluasocket/src \
-	$API_COMPAT_DEF \
+	$WIN64_PLUGIN_CFLAGS \
 	-Wl,--whole-archive \
 	window/x86_64/libluajit.a \
 	window/x86_64/libpbc.a \

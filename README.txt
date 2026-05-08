@@ -1,4 +1,4 @@
-ulua编译工程PC\Andriod基于luajit2.0.4，MAC\iOS\WinPhone基于luavm 
+ulua编译工程PC\Andriod基于luajit2.1.0-beta3，MAC\iOS\WinPhone基于luavm
 
 LuaJIT http://luajit.org/
 
